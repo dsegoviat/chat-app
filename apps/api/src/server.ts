@@ -108,6 +108,20 @@ function readCookie(cookieHeader: string | undefined, name: string): string | un
   return undefined;
 }
 
+function readSessionIdFromWsRequest(request: { headers: { cookie?: string }; url: string }): string | null {
+  const fromCookie = readCookie(request.headers.cookie, COOKIE_NAME);
+  if (fromCookie) {
+    return fromCookie;
+  }
+
+  try {
+    const parsedUrl = new URL(request.url, "http://localhost");
+    return parsedUrl.searchParams.get("sessionId");
+  } catch {
+    return null;
+  }
+}
+
 function sendSocketEvent(socket: WebSocket, event: ServerEvent): void {
   socket.send(JSON.stringify(event));
 }
@@ -248,6 +262,24 @@ export async function buildApp(options: BuildOptions): Promise<FastifyInstance> 
     return participants.get(cookieValue) ?? null;
   };
 
+  const resolveParticipantFromRequest = (request: {
+    cookies?: Record<string, string | undefined>;
+    headers?: Record<string, string | string[] | undefined>;
+  }): Participant | null => {
+    const cookieSessionId = resolveParticipantFromCookie(request.cookies?.[COOKIE_NAME]);
+    if (cookieSessionId) {
+      return cookieSessionId;
+    }
+
+    const headerValue = request.headers?.["x-chat-session-id"];
+    const sessionId = Array.isArray(headerValue) ? headerValue[0] : headerValue;
+    if (!sessionId) {
+      return null;
+    }
+
+    return participants.get(sessionId) ?? null;
+  };
+
   await app.register(cors, {
     origin: (origin, callback) => {
       if (!origin) {
@@ -321,7 +353,7 @@ export async function buildApp(options: BuildOptions): Promise<FastifyInstance> 
   });
 
   app.post("/api/leave", async (request, reply) => {
-    const participant = resolveParticipantFromCookie(request.cookies[COOKIE_NAME]);
+    const participant = resolveParticipantFromRequest(request);
     if (participant) {
       suppressedReservationOnClose.add(participant.id);
       clearOwnedHandleState(participant.id);
@@ -339,7 +371,7 @@ export async function buildApp(options: BuildOptions): Promise<FastifyInstance> 
   });
 
   app.get("/api/bootstrap", async (request, reply) => {
-    const participant = resolveParticipantFromCookie(request.cookies[COOKIE_NAME]);
+    const participant = resolveParticipantFromRequest(request);
     if (!participant) {
       return reply.status(401).send({ error: "missing_session" });
     }
@@ -361,9 +393,8 @@ export async function buildApp(options: BuildOptions): Promise<FastifyInstance> 
       reply.code(426).send({ error: "websocket_required" });
     },
     wsHandler: (socket, request) => {
-      const participant = resolveParticipantFromCookie(
-        readCookie(request.headers.cookie, COOKIE_NAME)
-      );
+      const sessionId = readSessionIdFromWsRequest(request);
+      const participant = sessionId ? participants.get(sessionId) ?? null : null;
 
       if (!participant) {
         sendSocketEvent(socket, { type: "chat/error", reason: "missing_session" });

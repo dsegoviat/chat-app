@@ -27,6 +27,7 @@ import {
 } from "./chat-flow";
 
 const apiBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:4000";
+const SESSION_STORAGE_KEY = "chat_session_id";
 
 export default function HomePage() {
   const [joinState, setJoinState] = useState<JoinState>("idle");
@@ -44,7 +45,28 @@ export default function HomePage() {
   const [showSystemEvents, setShowSystemEvents] = useState(true);
   const wsRef = useRef<WebSocket | null>(null);
 
-  const websocketUrl = apiBaseUrl.replace("http", "ws") + "/ws";
+  const buildWebsocketUrl = () => {
+    const base = apiBaseUrl.replace("http", "ws") + "/ws";
+    if (typeof window === "undefined") {
+      return base;
+    }
+
+    const sessionId = window.localStorage.getItem(SESSION_STORAGE_KEY);
+    if (!sessionId) {
+      return base;
+    }
+
+    return `${base}?sessionId=${encodeURIComponent(sessionId)}`;
+  };
+
+  const getSessionHeader = (): Record<string, string> => {
+    if (typeof window === "undefined") {
+      return {};
+    }
+
+    const sessionId = window.localStorage.getItem(SESSION_STORAGE_KEY);
+    return sessionId ? { "x-chat-session-id": sessionId } : {};
+  };
 
   useEffect(() => {
     const prefs = loadTimelinePreferences();
@@ -54,13 +76,15 @@ export default function HomePage() {
     void (async () => {
       try {
         const bootstrap = await fetch(`${apiBaseUrl}/api/bootstrap`, {
-          credentials: "include"
+          credentials: "include",
+          headers: getSessionHeader()
         });
         if (!bootstrap.ok) {
           return;
         }
 
         const payload = (await bootstrap.json()) as BootstrapResponse;
+        window.localStorage.setItem(SESSION_STORAGE_KEY, payload.participant.id);
         setParticipantName(payload.participant.displayName);
         setParticipantsSeen(sortHandles([payload.participant.displayName]));
         setPresenceCount(payload.presenceCount);
@@ -84,7 +108,7 @@ export default function HomePage() {
   }, [showSystemEvents, showTimestamps]);
 
   const connectSocket = () => {
-    const socket = new WebSocket(websocketUrl);
+    const socket = new WebSocket(buildWebsocketUrl());
     wsRef.current = socket;
     const addSeenParticipant = (name: string) => {
       setParticipantsSeen((current) => sortHandles([...new Set([...current, name])]));
@@ -146,8 +170,17 @@ export default function HomePage() {
         return;
       }
 
+      const joinPayload = (await response.json().catch(() => null)) as
+        | { participant?: { id?: string } }
+        | null;
+      const joinedParticipantId = joinPayload?.participant?.id;
+      if (joinedParticipantId && typeof window !== "undefined") {
+        window.localStorage.setItem(SESSION_STORAGE_KEY, joinedParticipantId);
+      }
+
       const bootstrap = await fetch(`${apiBaseUrl}/api/bootstrap`, {
-        credentials: "include"
+        credentials: "include",
+        headers: getSessionHeader()
       });
 
       if (!bootstrap.ok) {
@@ -157,6 +190,7 @@ export default function HomePage() {
       }
 
       const payload = (await bootstrap.json()) as BootstrapResponse;
+      window.localStorage.setItem(SESSION_STORAGE_KEY, payload.participant.id);
       setParticipantName(payload.participant.displayName);
       setParticipantsSeen(sortHandles([payload.participant.displayName]));
       setPresenceCount(payload.presenceCount);
@@ -194,6 +228,9 @@ export default function HomePage() {
     setSystemMessages([]);
     setDraft("");
     setReplaced(false);
+    if (typeof window !== "undefined") {
+      window.localStorage.removeItem(SESSION_STORAGE_KEY);
+    }
   };
 
   const draftLength = draft.trim().length;

@@ -118,6 +118,30 @@ test("join sets session cookie and bootstrap returns participant", async () => {
   assert.equal(body.presenceCount, 0);
 });
 
+test("bootstrap accepts x-chat-session-id when cookie is unavailable", async () => {
+  const app = await buildApp({ webOrigin: LOCAL_WEB_ORIGIN });
+
+  const join = await app.inject({
+    method: "POST",
+    url: "/api/join",
+    payload: { displayName: "Alex" }
+  });
+
+  assert.equal(join.statusCode, 200);
+  const participantId = join.json().participant.id as string;
+
+  const bootstrap = await app.inject({
+    method: "GET",
+    url: "/api/bootstrap",
+    headers: { "x-chat-session-id": participantId }
+  });
+
+  assert.equal(bootstrap.statusCode, 200);
+  const body = bootstrap.json();
+  assert.equal(body.participant.id, participantId);
+  assert.equal(body.participant.displayName, "Alex");
+});
+
 test("join preserves session identity handle continuity across reconnect join", async () => {
   const app = await buildApp({ webOrigin: LOCAL_WEB_ORIGIN });
 
