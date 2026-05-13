@@ -21,6 +21,14 @@ export interface ChatMessage {
   timestamp: string;
 }
 
+export interface SystemEventMessage {
+  id: string;
+  participantId: string;
+  displayName: string;
+  content: "joined" | "left";
+  timestamp: string;
+}
+
 export interface JoinRequest {
   displayName: string;
 }
@@ -29,7 +37,11 @@ export interface JoinResponse {
   participant: Participant;
 }
 
-export type JoinErrorCode = "display_name_required" | "handle_invalid" | "handle_taken";
+export type JoinErrorCode =
+  | "display_name_required"
+  | "display_name_invalid"
+  | "display_name_taken"
+  | "display_name_reserved";
 
 export interface JoinErrorResponse {
   error: JoinErrorCode;
@@ -41,12 +53,16 @@ export interface BootstrapResponse {
   recentMessages: ChatMessage[];
 }
 
-export type ClientEvent = { type: "chat/send"; content: string };
+export type ClientEvent = { type: "chat/send"; content: string } | { type: "chat/leave" };
 
 export type ChatErrorReason =
   | "missing_session"
   | "invalid_payload"
   | "invalid_event_type"
+  | "display_name_required"
+  | "display_name_invalid"
+  | "display_name_taken"
+  | "display_name_reserved"
   | "message_blank"
   | "message_too_long";
 
@@ -54,5 +70,6 @@ export type ServerEvent =
   | { type: "chat/bootstrap"; payload: BootstrapResponse }
   | { type: "chat/presence"; presenceCount: number }
   | { type: "chat/message"; payload: ChatMessage }
+  | { type: "chat/system"; payload: SystemEventMessage }
   | { type: "chat/replaced"; reason: string }
   | { type: "chat/error"; reason: ChatErrorReason };

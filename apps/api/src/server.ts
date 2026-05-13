@@ -1,3 +1,5 @@
+import "dotenv/config";
+
 import cookie from "@fastify/cookie";
 import cors from "@fastify/cors";
 import websocket from "@fastify/websocket";
@@ -10,7 +12,8 @@ import type {
   JoinRequest,
   JoinResponse,
   Participant,
-  ServerEvent
+  ServerEvent,
+  SystemEventMessage
 } from "@chat-app/contracts";
 import { MESSAGE_MAX_LENGTH, RECENT_MESSAGES_LIMIT } from "@chat-app/contracts";
 import Fastify, { type FastifyInstance, type FastifyReply } from "fastify";
@@ -29,22 +32,32 @@ type BuildOptions = {
   realtimeGateway?: ManagedRealtimeGateway;
 };
 
+type ActiveConnection = {
+  participantId: string;
+  socket: WebSocket;
+};
+
 const COOKIE_NAME = "chat_session";
-const HANDLE_PATTERN = /^[A-Za-z][A-Za-z0-9_-]{2,19}$/;
+const RESERVED_HANDLES = new Set(["system"]);
 
 function normalizeHandle(displayName: string): string {
-  return displayName.toLowerCase();
+  return displayName.trim().toLowerCase();
 }
 
 function isValidHandle(displayName: string): boolean {
-  if (!HANDLE_PATTERN.test(displayName)) {
+  const handle = displayName.trim();
+  if (handle.length < 3 || handle.length > 20) {
     return false;
   }
-
-  if (displayName.includes("--") || displayName.includes("__")) {
+  if (!/^[A-Za-z]/.test(handle)) {
     return false;
   }
-
+  if (/[^A-Za-z0-9_-]/.test(handle)) {
+    return false;
+  }
+  if (handle.includes("--") || handle.includes("__")) {
+    return false;
+  }
   return true;
 }
 
@@ -95,8 +108,8 @@ export async function buildApp(options: BuildOptions): Promise<FastifyInstance> 
   }
 
   const participants = new Map<string, Participant>();
-  const participantHandles = new Map<string, string>();
-  const activeConnections = new Map<string, WebSocket>();
+  const participantIdsByHandle = new Map<string, string>();
+  const activeConnections = new Map<string, ActiveConnection>();
   let messageOrder = 0;
   const latestPersisted = await timelineStore.listRecentMessages(1);
   messageOrder = latestPersisted.at(0)?.order ?? 0;
@@ -106,10 +119,9 @@ export async function buildApp(options: BuildOptions): Promise<FastifyInstance> 
 
   const broadcast = (event: ServerEvent): void => {
     const serializedEvent = JSON.stringify(event);
-
     for (const connection of activeConnections.values()) {
-      if (connection.readyState === WebSocket.OPEN) {
-        connection.send(serializedEvent);
+      if (connection.socket.readyState === WebSocket.OPEN) {
+        connection.socket.send(serializedEvent);
       }
     }
   };
@@ -122,7 +134,6 @@ export async function buildApp(options: BuildOptions): Promise<FastifyInstance> 
     if (!cookieValue) {
       return null;
     }
-
     return participants.get(cookieValue) ?? null;
   };
 
@@ -144,20 +155,22 @@ export async function buildApp(options: BuildOptions): Promise<FastifyInstance> 
 
   app.post<{ Body: JoinRequest }>("/api/join", async (request, reply) => {
     const displayName = String(request.body?.displayName ?? "").trim();
+    const normalizedHandle = normalizeHandle(displayName);
     const previousParticipant = resolveParticipantFromCookie(request.cookies[COOKIE_NAME]);
-    const isFirstJoin = !previousParticipant;
-    if (isFirstJoin && !displayName) {
+
+    if (!previousParticipant && !displayName) {
       return sendJoinError(reply, 400, "display_name_required");
     }
 
-    if (isFirstJoin && !isValidHandle(displayName)) {
-      return sendJoinError(reply, 400, "handle_invalid");
-    }
-
-    if (isFirstJoin) {
-      const normalizedDisplayName = normalizeHandle(displayName);
-      if (participantHandles.has(normalizedDisplayName)) {
-        return sendJoinError(reply, 409, "handle_taken");
+    if (!previousParticipant) {
+      if (!isValidHandle(displayName)) {
+        return sendJoinError(reply, 400, "display_name_invalid");
+      }
+      if (RESERVED_HANDLES.has(normalizedHandle)) {
+        return sendJoinError(reply, 400, "display_name_reserved");
+      }
+      if (participantIdsByHandle.has(normalizedHandle)) {
+        return sendJoinError(reply, 409, "display_name_taken");
       }
     }
 
@@ -167,7 +180,7 @@ export async function buildApp(options: BuildOptions): Promise<FastifyInstance> 
     };
 
     participants.set(participant.id, participant);
-    participantHandles.set(normalizeHandle(participant.displayName), participant.id);
+    participantIdsByHandle.set(normalizeHandle(participant.displayName), participant.id);
 
     reply.setCookie(COOKIE_NAME, participant.id, {
       path: "/",
@@ -213,17 +226,29 @@ export async function buildApp(options: BuildOptions): Promise<FastifyInstance> 
       }
 
       const existingConnection = activeConnections.get(participant.id);
-      if (existingConnection && existingConnection !== socket) {
-        if (existingConnection.readyState === WebSocket.OPEN) {
-          sendSocketEvent(existingConnection, {
+      const isReplacement = Boolean(existingConnection && existingConnection.socket !== socket);
+      if (existingConnection && existingConnection.socket !== socket) {
+        if (existingConnection.socket.readyState === WebSocket.OPEN) {
+          sendSocketEvent(existingConnection.socket, {
             type: "chat/replaced",
             reason: "A newer tab became active for this identity."
           });
         }
-        existingConnection.close(4001, "replaced");
+        existingConnection.socket.close(4001, "replaced");
       }
 
-      activeConnections.set(participant.id, socket);
+      activeConnections.set(participant.id, { participantId: participant.id, socket });
+      if (!isReplacement) {
+        const joinedEvent: SystemEventMessage = {
+          id: randomUUID(),
+          participantId: participant.id,
+          displayName: participant.displayName,
+          content: "joined",
+          timestamp: new Date().toISOString()
+        };
+        broadcast({ type: "chat/system", payload: joinedEvent });
+      }
+
       void (async () => {
         try {
           const recentMessages = await timelineStore.listRecentMessages(RECENT_MESSAGES_LIMIT);
@@ -253,6 +278,10 @@ export async function buildApp(options: BuildOptions): Promise<FastifyInstance> 
         }
 
         if (event.type !== "chat/send") {
+          if (event.type === "chat/leave") {
+            socket.close(4002, "left");
+            return;
+          }
           sendSocketEvent(socket, { type: "chat/error", reason: "invalid_event_type" });
           return;
         }
@@ -291,8 +320,16 @@ export async function buildApp(options: BuildOptions): Promise<FastifyInstance> 
 
       socket.on("close", () => {
         const currentConnection = activeConnections.get(participant.id);
-        if (currentConnection === socket) {
+        if (currentConnection?.socket === socket) {
           activeConnections.delete(participant.id);
+          const leftEvent: SystemEventMessage = {
+            id: randomUUID(),
+            participantId: participant.id,
+            displayName: participant.displayName,
+            content: "left",
+            timestamp: new Date().toISOString()
+          };
+          broadcast({ type: "chat/system", payload: leftEvent });
           updatePresence();
         }
       });
