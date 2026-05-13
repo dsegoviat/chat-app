@@ -3,10 +3,14 @@ import assert from "node:assert/strict";
 
 import { type RawData, type WebSocket } from "ws";
 
+import { createInMemoryTimelineStore } from "./managed-backend";
 import { buildApp } from "./server";
 
-async function withServer(run: (url: string) => Promise<void>): Promise<void> {
-  const app = await buildApp({ webOrigin: "http://localhost:3000" });
+async function withServer(
+  run: (url: string, app: Awaited<ReturnType<typeof buildApp>>) => Promise<void>,
+  options?: Parameters<typeof buildApp>[0]
+): Promise<void> {
+  const app = await buildApp({ webOrigin: "http://localhost:3000", ...options });
   await app.listen({ port: 0, host: "127.0.0.1" });
 
   const address = app.server.address();
@@ -15,7 +19,7 @@ async function withServer(run: (url: string) => Promise<void>): Promise<void> {
   }
 
   try {
-    await run(`http://127.0.0.1:${address.port}`);
+    await run(`http://127.0.0.1:${address.port}`, app);
   } finally {
     await app.close();
   }
@@ -220,6 +224,48 @@ test("message pipeline enforces validation, order, and recent replay cap", async
 
     socket.close();
   });
+});
+
+test("timeline store retains full history while bootstrap returns latest 20", async () => {
+  const timelineStore = createInMemoryTimelineStore();
+  await withServer(async (baseUrl) => {
+    const join = await fetch(`${baseUrl}/api/join`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ displayName: "Alex" })
+    });
+    assert.equal(join.status, 200);
+    const setCookie = join.headers.get("set-cookie");
+    assert.ok(setCookie);
+
+    const wsModule = await import("ws");
+    const socket = new wsModule.WebSocket(toWsUrl(baseUrl), {
+      headers: { cookie: setCookie }
+    });
+    await waitForOpen(socket);
+
+    for (let i = 0; i < 25; i += 1) {
+      socket.send(JSON.stringify({ type: "chat/send", content: `m-${i}` }));
+    }
+
+    await sleep(250);
+
+    const bootstrap = await fetch(`${baseUrl}/api/bootstrap`, {
+      headers: { cookie: setCookie }
+    });
+    assert.equal(bootstrap.status, 200);
+    const payload = (await bootstrap.json()) as { recentMessages: Array<{ content: string }> };
+    assert.equal(payload.recentMessages.length, 20);
+    assert.equal(payload.recentMessages[0]?.content, "m-5");
+    assert.equal(payload.recentMessages[19]?.content, "m-24");
+
+    const fullTimeline = timelineStore.listAllMessagesForDebug();
+    assert.equal(fullTimeline.length, 25);
+    assert.equal(fullTimeline[0]?.content, "m-0");
+    assert.equal(fullTimeline[24]?.content, "m-24");
+
+    socket.close();
+  }, { webOrigin: "http://localhost:3000", timelineStore });
 });
 
 test("all participants observe the same server message order", async () => {

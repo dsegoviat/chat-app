@@ -15,6 +15,7 @@ import { MESSAGE_MAX_LENGTH, RECENT_MESSAGES_LIMIT } from "@chat-app/contracts";
 import Fastify, { type FastifyInstance } from "fastify";
 import { randomUUID } from "node:crypto";
 import { type RawData, WebSocket } from "ws";
+import { createManagedTimelineStoreFromEnv, type ManagedTimelineStore } from "./managed-backend";
 
 type ActiveConnection = {
   participantId: string;
@@ -23,6 +24,7 @@ type ActiveConnection = {
 
 type BuildOptions = {
   webOrigin: string;
+  timelineStore?: ManagedTimelineStore;
 };
 
 const COOKIE_NAME = "chat_session";
@@ -49,11 +51,17 @@ function sendSocketEvent(socket: WebSocket, event: ServerEvent): void {
 
 export async function buildApp(options: BuildOptions): Promise<FastifyInstance> {
   const app = Fastify({ logger: true });
+  const managedStoreFromEnv = createManagedTimelineStoreFromEnv();
+  const timelineStore = options.timelineStore ?? managedStoreFromEnv.store;
+  if (!options.timelineStore && "warning" in managedStoreFromEnv) {
+    app.log.warn(managedStoreFromEnv.warning);
+  }
 
   const participants = new Map<string, Participant>();
   const activeConnections = new Map<string, ActiveConnection>();
-  const recentMessages: ChatMessage[] = [];
   let messageOrder = 0;
+  const latestPersisted = await timelineStore.listRecentMessages(1);
+  messageOrder = latestPersisted.at(0)?.order ?? 0;
 
   const broadcast = (event: ServerEvent): void => {
     const serializedEvent = JSON.stringify(event);
@@ -123,6 +131,7 @@ export async function buildApp(options: BuildOptions): Promise<FastifyInstance> 
       return reply.status(401).send({ error: "missing_session" });
     }
 
+    const recentMessages = await timelineStore.listRecentMessages(RECENT_MESSAGES_LIMIT);
     const response: BootstrapResponse = {
       participant,
       presenceCount: activeConnections.size,
@@ -161,15 +170,24 @@ export async function buildApp(options: BuildOptions): Promise<FastifyInstance> 
       }
 
       activeConnections.set(participant.id, { participantId: participant.id, socket });
-      sendSocketEvent(socket, {
-        type: "chat/bootstrap",
-        payload: {
-          participant,
-          presenceCount: activeConnections.size,
-          recentMessages
-        }
-      });
-      updatePresence();
+      void timelineStore
+        .listRecentMessages(RECENT_MESSAGES_LIMIT)
+        .then((recentMessages) => {
+          sendSocketEvent(socket, {
+            type: "chat/bootstrap",
+            payload: {
+              participant,
+              presenceCount: activeConnections.size,
+              recentMessages
+            }
+          });
+          updatePresence();
+        })
+        .catch((error) => {
+          request.log.error(error, "Failed to bootstrap recent timeline from managed store.");
+          sendSocketEvent(socket, { type: "chat/error", reason: "invalid_payload" });
+          socket.close(1011, "bootstrap_failed");
+        });
 
       socket.on("message", (raw: RawData) => {
         let event: ClientEvent;
@@ -206,12 +224,15 @@ export async function buildApp(options: BuildOptions): Promise<FastifyInstance> 
           timestamp: new Date().toISOString()
         };
 
-        recentMessages.push(chatMessage);
-        if (recentMessages.length > RECENT_MESSAGES_LIMIT) {
-          recentMessages.shift();
-        }
-
-        broadcast({ type: "chat/message", payload: chatMessage });
+        void timelineStore
+          .appendMessage(chatMessage)
+          .then(() => {
+            broadcast({ type: "chat/message", payload: chatMessage });
+          })
+          .catch((error) => {
+            request.log.error(error, "Failed to persist message in managed timeline store.");
+            sendSocketEvent(socket, { type: "chat/error", reason: "invalid_payload" });
+          });
       });
 
       socket.on("close", () => {
