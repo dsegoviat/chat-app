@@ -627,6 +627,15 @@ test("managed realtime gateway fans out live timeline across app instances", asy
 
     await Promise.all([waitForOpen(socketA), waitForOpen(socketB)]);
 
+    const bootstrapBWhileBothConnected = await fetch(`${baseUrlB}/api/bootstrap`, {
+      headers: { cookie: cookieB }
+    });
+    assert.equal(bootstrapBWhileBothConnected.status, 200);
+    const bootstrapBPayload = (await bootstrapBWhileBothConnected.json()) as {
+      presenceCount: number;
+    };
+    assert.equal(bootstrapBPayload.presenceCount, 2);
+
     socketA.send(JSON.stringify({ type: "chat/send", content: "cross-instance" }));
     await sleep(200);
 

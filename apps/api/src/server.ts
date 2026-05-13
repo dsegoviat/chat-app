@@ -9,15 +9,18 @@ import type {
   JoinRequest,
   JoinResponse,
   Participant,
-  ServerEvent
+  ServerEvent,
+  SystemEventMessage
 } from "@chat-app/contracts";
 import { MESSAGE_MAX_LENGTH, RECENT_MESSAGES_LIMIT } from "@chat-app/contracts";
 import Fastify, { type FastifyInstance } from "fastify";
 import { randomUUID } from "node:crypto";
 import { type RawData, WebSocket } from "ws";
 import {
+  createManagedPresenceProjectionFromEnv,
   createManagedRealtimeGatewayFromEnv,
   createManagedTimelineStoreFromEnv,
+  type ManagedPresenceProjection,
   type ManagedRealtimeGateway,
   type ManagedTimelineStore
 } from "./managed-backend";
@@ -31,10 +34,12 @@ type BuildOptions = {
   webOrigin: string;
   timelineStore?: ManagedTimelineStore;
   realtimeGateway?: ManagedRealtimeGateway;
+  presenceProjection?: ManagedPresenceProjection;
   now?: () => Date;
 };
 
 const COOKIE_NAME = "chat_session";
+const RESERVED_HANDLES = new Set(["system"]);
 const HANDLE_RECLAIM_WINDOW_MS = 5 * 60 * 1000;
 
 type HandleReservation = {
@@ -66,17 +71,35 @@ function sendInvalidPayload(socket: WebSocket): void {
   sendSocketEvent(socket, { type: "chat/error", reason: "invalid_payload" });
 }
 
+function createSystemEvent(
+  participant: Participant,
+  content: SystemEventMessage["content"]
+): SystemEventMessage {
+  return {
+    id: randomUUID(),
+    participantId: participant.id,
+    displayName: participant.displayName,
+    content,
+    timestamp: new Date().toISOString()
+  };
+}
+
 export async function buildApp(options: BuildOptions): Promise<FastifyInstance> {
   const app = Fastify({ logger: true });
   const managedStoreFromEnv = createManagedTimelineStoreFromEnv();
   const managedRealtimeFromEnv = createManagedRealtimeGatewayFromEnv();
+  const managedPresenceFromEnv = createManagedPresenceProjectionFromEnv();
   const timelineStore = options.timelineStore ?? managedStoreFromEnv.store;
   const realtimeGateway = options.realtimeGateway ?? managedRealtimeFromEnv.gateway;
+  const presenceProjection = options.presenceProjection ?? managedPresenceFromEnv.projection;
   if (!options.timelineStore && "warning" in managedStoreFromEnv) {
     app.log.warn(managedStoreFromEnv.warning);
   }
   if (!options.realtimeGateway && "warning" in managedRealtimeFromEnv) {
     app.log.warn(managedRealtimeFromEnv.warning);
+  }
+  if (!options.presenceProjection && "warning" in managedPresenceFromEnv) {
+    app.log.warn(managedPresenceFromEnv.warning);
   }
 
   const participants = new Map<string, Participant>();
@@ -84,6 +107,7 @@ export async function buildApp(options: BuildOptions): Promise<FastifyInstance> 
   const reservedHandles = new Map<string, HandleReservation>();
   const suppressedReservationOnClose = new Set<string>();
   const activeConnections = new Map<string, ActiveConnection>();
+  let projectedPresenceCount = 0;
   const now = options.now ?? (() => new Date());
   let messageOrder = 0;
   const latestPersisted = await timelineStore.listRecentMessages(1);
@@ -103,8 +127,13 @@ export async function buildApp(options: BuildOptions): Promise<FastifyInstance> 
   };
 
   const updatePresence = (): void => {
-    broadcast({ type: "chat/presence", presenceCount: activeConnections.size });
+    broadcast({ type: "chat/presence", presenceCount: projectedPresenceCount });
   };
+  const unsubscribePresence = presenceProjection.subscribeToPresence((participantIds) => {
+    projectedPresenceCount = participantIds.length;
+    updatePresence();
+  });
+  projectedPresenceCount = (await presenceProjection.listActiveParticipantIds()).length;
 
   const normalizeHandle = (value: string): string => value.toLowerCase();
   const isHandleValid = (value: string): boolean => {
@@ -193,19 +222,26 @@ export async function buildApp(options: BuildOptions): Promise<FastifyInstance> 
     const previousParticipant = resolveParticipantFromCookie(request.cookies[COOKIE_NAME]);
     const normalizedRequestedHandle = normalizeHandle(displayName);
 
+    if (!previousParticipant && !displayName) {
+      return reply.status(400).send({ error: "display_name_required" as const });
+    }
+
     if (!previousParticipant) {
       if (!isHandleValid(displayName)) {
-        return reply.status(400).send({ error: "handle_invalid" });
+        return reply.status(400).send({ error: "display_name_invalid" as const });
+      }
+      if (RESERVED_HANDLES.has(normalizedRequestedHandle)) {
+        return reply.status(400).send({ error: "display_name_reserved" as const });
       }
 
       const activeOwner = activeHandles.get(normalizedRequestedHandle);
       if (activeOwner) {
-        return reply.status(409).send({ error: "handle_taken" });
+        return reply.status(409).send({ error: "display_name_taken" as const });
       }
 
       const reservation = reservedHandles.get(normalizedRequestedHandle);
       if (reservation) {
-        return reply.status(409).send({ error: "handle_reserved" });
+        return reply.status(409).send({ error: "display_name_reserved" as const });
       }
     }
 
@@ -255,7 +291,7 @@ export async function buildApp(options: BuildOptions): Promise<FastifyInstance> 
     const recentMessages = await timelineStore.listRecentMessages(RECENT_MESSAGES_LIMIT);
     const response: BootstrapResponse = {
       participant,
-      presenceCount: activeConnections.size,
+      presenceCount: projectedPresenceCount,
       recentMessages
     };
 
@@ -280,6 +316,7 @@ export async function buildApp(options: BuildOptions): Promise<FastifyInstance> 
       }
 
       const existingConnection = activeConnections.get(participant.id);
+      const isReplacement = Boolean(existingConnection && existingConnection.socket !== socket);
       if (existingConnection && existingConnection.socket !== socket) {
         if (existingConnection.socket.readyState === WebSocket.OPEN) {
           sendSocketEvent(existingConnection.socket, {
@@ -291,6 +328,9 @@ export async function buildApp(options: BuildOptions): Promise<FastifyInstance> 
       }
 
       activeConnections.set(participant.id, { participantId: participant.id, socket });
+      if (!isReplacement) {
+        broadcast({ type: "chat/system", payload: createSystemEvent(participant, "joined") });
+      }
       void (async () => {
         try {
           const recentMessages = await timelineStore.listRecentMessages(RECENT_MESSAGES_LIMIT);
@@ -298,11 +338,11 @@ export async function buildApp(options: BuildOptions): Promise<FastifyInstance> 
             type: "chat/bootstrap",
             payload: {
               participant,
-              presenceCount: activeConnections.size,
+              presenceCount: projectedPresenceCount,
               recentMessages
             }
           });
-          updatePresence();
+          await presenceProjection.markActive(participant.id);
         } catch (error) {
           request.log.error(error, "Failed to bootstrap recent timeline from managed store.");
           sendInvalidPayload(socket);
@@ -320,6 +360,10 @@ export async function buildApp(options: BuildOptions): Promise<FastifyInstance> 
         }
 
         if (event.type !== "chat/send") {
+          if (event.type === "chat/leave") {
+            socket.close(4002, "left");
+            return;
+          }
           sendSocketEvent(socket, { type: "chat/error", reason: "invalid_event_type" });
           return;
         }
@@ -366,7 +410,8 @@ export async function buildApp(options: BuildOptions): Promise<FastifyInstance> 
           } else {
             reserveParticipantHandle(participant);
           }
-          updatePresence();
+          void presenceProjection.markInactive(participant.id);
+          broadcast({ type: "chat/system", payload: createSystemEvent(participant, "left") });
         }
       });
     }
@@ -374,6 +419,8 @@ export async function buildApp(options: BuildOptions): Promise<FastifyInstance> 
 
   app.addHook("onClose", async () => {
     unsubscribeRealtime();
+    unsubscribePresence();
+    presenceProjection.close();
   });
 
   return app;
