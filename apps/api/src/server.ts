@@ -39,7 +39,6 @@ const HANDLE_RECLAIM_WINDOW_MS = 5 * 60 * 1000;
 
 type HandleReservation = {
   participantId: string;
-  normalizedHandle: string;
   expiresAtMs: number;
 };
 
@@ -124,17 +123,36 @@ export async function buildApp(options: BuildOptions): Promise<FastifyInstance> 
 
     return true;
   };
-  const clearExistingHandleState = (participantId: string): void => {
+  const clearOwnedActiveHandle = (participantId: string): void => {
     for (const [normalizedHandle, ownerParticipantId] of activeHandles.entries()) {
       if (ownerParticipantId === participantId) {
         activeHandles.delete(normalizedHandle);
       }
     }
+  };
+  const clearOwnedReservedHandle = (participantId: string): void => {
     for (const [normalizedHandle, reservation] of reservedHandles.entries()) {
       if (reservation.participantId === participantId) {
         reservedHandles.delete(normalizedHandle);
       }
     }
+  };
+  const clearOwnedHandleState = (participantId: string): void => {
+    clearOwnedActiveHandle(participantId);
+    clearOwnedReservedHandle(participantId);
+  };
+  const activateParticipantHandle = (participant: Participant): void => {
+    clearOwnedActiveHandle(participant.id);
+    const normalizedHandle = normalizeHandle(participant.displayName);
+    activeHandles.set(normalizedHandle, participant.id);
+  };
+  const reserveParticipantHandle = (participant: Participant): void => {
+    clearOwnedReservedHandle(participant.id);
+    const normalizedHandle = normalizeHandle(participant.displayName);
+    reservedHandles.set(normalizedHandle, {
+      participantId: participant.id,
+      expiresAtMs: now().getTime() + HANDLE_RECLAIM_WINDOW_MS
+    });
   };
   const pruneExpiredReservations = (): void => {
     const nowMs = now().getTime();
@@ -195,8 +213,8 @@ export async function buildApp(options: BuildOptions): Promise<FastifyInstance> 
       id: randomUUID(),
       displayName
     };
-    clearExistingHandleState(participant.id);
-    activeHandles.set(normalizeHandle(participant.displayName), participant.id);
+    clearOwnedReservedHandle(participant.id);
+    activateParticipantHandle(participant);
 
     participants.set(participant.id, participant);
 
@@ -214,7 +232,7 @@ export async function buildApp(options: BuildOptions): Promise<FastifyInstance> 
     const participant = resolveParticipantFromCookie(request.cookies[COOKIE_NAME]);
     if (participant) {
       suppressedReservationOnClose.add(participant.id);
-      clearExistingHandleState(participant.id);
+      clearOwnedHandleState(participant.id);
       participants.delete(participant.id);
       const connection = activeConnections.get(participant.id);
       if (connection) {
@@ -342,16 +360,11 @@ export async function buildApp(options: BuildOptions): Promise<FastifyInstance> 
         const currentConnection = activeConnections.get(participant.id);
         if (currentConnection?.socket === socket) {
           activeConnections.delete(participant.id);
-          clearExistingHandleState(participant.id);
+          clearOwnedHandleState(participant.id);
           if (suppressedReservationOnClose.has(participant.id)) {
             suppressedReservationOnClose.delete(participant.id);
           } else {
-            const normalizedHandle = normalizeHandle(participant.displayName);
-            reservedHandles.set(normalizedHandle, {
-              participantId: participant.id,
-              normalizedHandle,
-              expiresAtMs: now().getTime() + HANDLE_RECLAIM_WINDOW_MS
-            });
+            reserveParticipantHandle(participant);
           }
           updatePresence();
         }
