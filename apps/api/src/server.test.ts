@@ -9,11 +9,16 @@ import {
 } from "./managed-backend";
 import { buildApp } from "./server";
 
+const LOCAL_WEB_ORIGIN = "http://localhost:3000";
+const JSON_HEADERS = { "content-type": "application/json" };
+
+type ChatEvent = { type: string; [key: string]: unknown };
+
 async function withServer(
   run: (url: string, app: Awaited<ReturnType<typeof buildApp>>) => Promise<void>,
   options?: Parameters<typeof buildApp>[0]
 ): Promise<void> {
-  const app = await buildApp({ webOrigin: "http://localhost:3000", ...options });
+  const app = await buildApp({ webOrigin: LOCAL_WEB_ORIGIN, ...options });
   await app.listen({ port: 0, host: "127.0.0.1" });
 
   const address = app.server.address();
@@ -32,8 +37,8 @@ function toWsUrl(baseUrl: string): string {
   return `${baseUrl.replace("http", "ws")}/ws`;
 }
 
-function parseSocketEvent(raw: RawData): { type: string; [key: string]: unknown } {
-  return JSON.parse(raw.toString()) as { type: string; [key: string]: unknown };
+function parseSocketEvent(raw: RawData): ChatEvent {
+  return JSON.parse(raw.toString()) as ChatEvent;
 }
 
 function waitForOpen(socket: WebSocket): Promise<void> {
@@ -45,6 +50,23 @@ function waitForOpen(socket: WebSocket): Promise<void> {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function getSessionCookieFromJoin(
+  join: {
+    cookies: Array<{ name: string; value: string }>;
+  },
+  cookieName = "chat_session"
+): string {
+  const sessionCookie = join.cookies.find((cookie) => cookie.name === cookieName);
+  assert.ok(sessionCookie);
+  return sessionCookie.value;
+}
+
+function getRequiredSetCookie(response: Response): string {
+  const cookie = response.headers.get("set-cookie");
+  assert.ok(cookie);
+  return cookie;
 }
 
 function collectPresenceAndMessages(socket: WebSocket): {
@@ -72,7 +94,7 @@ function collectPresenceAndMessages(socket: WebSocket): {
 }
 
 test("join sets session cookie and bootstrap returns participant", async () => {
-  const app = await buildApp({ webOrigin: "http://localhost:3000" });
+  const app = await buildApp({ webOrigin: LOCAL_WEB_ORIGIN });
 
   const join = await app.inject({
     method: "POST",
@@ -81,13 +103,12 @@ test("join sets session cookie and bootstrap returns participant", async () => {
   });
 
   assert.equal(join.statusCode, 200);
-  const sessionCookie = join.cookies.find((cookie) => cookie.name === "chat_session");
-  assert.ok(sessionCookie);
+  const sessionCookie = getSessionCookieFromJoin(join);
 
   const bootstrap = await app.inject({
     method: "GET",
     url: "/api/bootstrap",
-    cookies: { chat_session: sessionCookie.value }
+    cookies: { chat_session: sessionCookie }
   });
 
   assert.equal(bootstrap.statusCode, 200);
@@ -98,7 +119,7 @@ test("join sets session cookie and bootstrap returns participant", async () => {
 });
 
 test("join preserves session identity handle continuity across reconnect join", async () => {
-  const app = await buildApp({ webOrigin: "http://localhost:3000" });
+  const app = await buildApp({ webOrigin: LOCAL_WEB_ORIGIN });
 
   const firstJoin = await app.inject({
     method: "POST",
@@ -107,14 +128,13 @@ test("join preserves session identity handle continuity across reconnect join", 
   });
 
   assert.equal(firstJoin.statusCode, 200);
-  const sessionCookie = firstJoin.cookies.find((cookie) => cookie.name === "chat_session");
-  assert.ok(sessionCookie);
+  const sessionCookie = getSessionCookieFromJoin(firstJoin);
 
   const secondJoin = await app.inject({
     method: "POST",
     url: "/api/join",
     payload: { displayName: "Blair" },
-    cookies: { chat_session: sessionCookie.value }
+    cookies: { chat_session: sessionCookie }
   });
 
   assert.equal(secondJoin.statusCode, 200);
@@ -126,7 +146,7 @@ test("join preserves session identity handle continuity across reconnect join", 
 });
 
 test("join allows blank reconnect payload when session identity already exists", async () => {
-  const app = await buildApp({ webOrigin: "http://localhost:3000" });
+  const app = await buildApp({ webOrigin: LOCAL_WEB_ORIGIN });
 
   const firstJoin = await app.inject({
     method: "POST",
@@ -135,14 +155,13 @@ test("join allows blank reconnect payload when session identity already exists",
   });
 
   assert.equal(firstJoin.statusCode, 200);
-  const sessionCookie = firstJoin.cookies.find((cookie) => cookie.name === "chat_session");
-  assert.ok(sessionCookie);
+  const sessionCookie = getSessionCookieFromJoin(firstJoin);
 
   const reconnectJoin = await app.inject({
     method: "POST",
     url: "/api/join",
     payload: { displayName: "   " },
-    cookies: { chat_session: sessionCookie.value }
+    cookies: { chat_session: sessionCookie }
   });
 
   assert.equal(reconnectJoin.statusCode, 200);
@@ -156,101 +175,111 @@ test("join allows blank reconnect payload when session identity already exists",
   assert.equal(reconnectParticipant.displayName, "Alex");
 });
 
-test("join enforces handle validation and case-insensitive uniqueness outcomes", async () => {
-  const app = await buildApp({ webOrigin: "http://localhost:3000" });
+test("join enforces handle format, reservation, and case-insensitive uniqueness", async () => {
+  const app = await buildApp({ webOrigin: LOCAL_WEB_ORIGIN });
 
   const invalid = await app.inject({
     method: "POST",
     url: "/api/join",
-    payload: { displayName: "1 bad handle" }
+    payload: { displayName: "1bad" }
   });
   assert.equal(invalid.statusCode, 400);
-  assert.equal(invalid.json().error, "handle_invalid");
+  assert.equal(invalid.json().error, "display_name_invalid");
 
-  const firstJoin = await app.inject({
+  const reserved = await app.inject({
     method: "POST",
     url: "/api/join",
-    payload: { displayName: "Alex_1" }
+    payload: { displayName: "System" }
   });
-  assert.equal(firstJoin.statusCode, 200);
+  assert.equal(reserved.statusCode, 400);
+  assert.equal(reserved.json().error, "display_name_reserved");
 
-  const secondJoin = await app.inject({
+  const first = await app.inject({
     method: "POST",
     url: "/api/join",
-    payload: { displayName: "aLeX_1" }
+    payload: { displayName: "Alex" }
   });
-  assert.equal(secondJoin.statusCode, 409);
-  assert.equal(secondJoin.json().error, "handle_taken");
+  assert.equal(first.statusCode, 200);
+
+  const taken = await app.inject({
+    method: "POST",
+    url: "/api/join",
+    payload: { displayName: "alex" }
+  });
+  assert.equal(taken.statusCode, 409);
+  assert.equal(taken.json().error, "display_name_taken");
 });
 
 test("disconnect reserves handle for same identity reclaim and leave releases immediately", async () => {
   let nowMs = Date.now();
-  await withServer(async (baseUrl) => {
-    const wsModule = await import("ws");
-    const joinAlex = await fetch(`${baseUrl}/api/join`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ displayName: "Alex" })
-    });
-    assert.equal(joinAlex.status, 200);
-    const alexCookie = joinAlex.headers.get("set-cookie");
-    assert.ok(alexCookie);
+  await withServer(
+    async (baseUrl) => {
+      const wsModule = await import("ws");
+      const joinAlex = await fetch(`${baseUrl}/api/join`, {
+        method: "POST",
+        headers: JSON_HEADERS,
+        body: JSON.stringify({ displayName: "Alex" })
+      });
+      assert.equal(joinAlex.status, 200);
+      const alexCookie = getRequiredSetCookie(joinAlex);
 
-    const socketAlex = new wsModule.WebSocket(toWsUrl(baseUrl), {
-      headers: { cookie: alexCookie }
-    });
-    await waitForOpen(socketAlex);
-    socketAlex.close();
-    await sleep(100);
+      const socketAlex = new wsModule.WebSocket(toWsUrl(baseUrl), {
+        headers: { cookie: alexCookie }
+      });
+      await waitForOpen(socketAlex);
+      socketAlex.close();
+      await sleep(100);
 
-    const blocked = await fetch(`${baseUrl}/api/join`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ displayName: "ALEx" })
-    });
-    assert.equal(blocked.status, 409);
-    assert.equal((await blocked.json()).error, "handle_reserved");
+      const blocked = await fetch(`${baseUrl}/api/join`, {
+        method: "POST",
+        headers: JSON_HEADERS,
+        body: JSON.stringify({ displayName: "ALEx" })
+      });
+      assert.equal(blocked.status, 409);
+      assert.equal((await blocked.json()).error, "display_name_reserved");
 
-    const reclaimed = await fetch(`${baseUrl}/api/join`, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        cookie: alexCookie
-      },
-      body: JSON.stringify({ displayName: "DifferentHandle" })
-    });
-    assert.equal(reclaimed.status, 200);
-    const reclaimedBody = (await reclaimed.json()) as { participant: { displayName: string } };
-    assert.equal(reclaimedBody.participant.displayName, "Alex");
+      const reclaimed = await fetch(`${baseUrl}/api/join`, {
+        method: "POST",
+        headers: {
+          ...JSON_HEADERS,
+          cookie: alexCookie
+        },
+        body: JSON.stringify({ displayName: "DifferentHandle" })
+      });
+      assert.equal(reclaimed.status, 200);
+      const reclaimedBody = (await reclaimed.json()) as { participant: { displayName: string } };
+      assert.equal(reclaimedBody.participant.displayName, "Alex");
 
-    const socketReclaimed = new wsModule.WebSocket(toWsUrl(baseUrl), {
-      headers: { cookie: alexCookie }
-    });
-    await waitForOpen(socketReclaimed);
-    socketReclaimed.close();
-    await sleep(100);
+      const socketReclaimed = new wsModule.WebSocket(toWsUrl(baseUrl), {
+        headers: { cookie: alexCookie }
+      });
+      await waitForOpen(socketReclaimed);
+      socketReclaimed.close();
+      await sleep(100);
 
-    nowMs += 5 * 60 * 1000 + 1;
-    const expired = await fetch(`${baseUrl}/api/join`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ displayName: "alex" })
-    });
-    assert.equal(expired.status, 200);
+      nowMs += 5 * 60 * 1000 + 1;
+      const expired = await fetch(`${baseUrl}/api/join`, {
+        method: "POST",
+        headers: JSON_HEADERS,
+        body: JSON.stringify({ displayName: "alex" })
+      });
+      assert.equal(expired.status, 200);
 
-    const leave = await fetch(`${baseUrl}/api/leave`, {
-      method: "POST",
-      headers: { cookie: alexCookie }
-    });
-    assert.equal(leave.status, 204);
+      const leave = await fetch(`${baseUrl}/api/leave`, {
+        method: "POST",
+        headers: { cookie: alexCookie }
+      });
+      assert.equal(leave.status, 204);
 
-    const afterLeave = await fetch(`${baseUrl}/api/join`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ displayName: "DifferentHandle" })
-    });
-    assert.equal(afterLeave.status, 200);
-  }, { webOrigin: "http://localhost:3000", now: () => new Date(nowMs) });
+      const afterLeave = await fetch(`${baseUrl}/api/join`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ displayName: "DifferentHandle" })
+      });
+      assert.equal(afterLeave.status, 200);
+    },
+    { webOrigin: LOCAL_WEB_ORIGIN, now: () => new Date(nowMs) }
+  );
 });
 
 test("message pipeline enforces validation, order, and recent replay cap", async () => {
@@ -559,6 +588,63 @@ test("late join receives recent replay and presence reflects connection lifecycl
 
     socketAlexReplacement.close();
     socketAlex.close();
+  });
+});
+
+test("system events include explicit join/leave and omit replacement reconnect noise", async () => {
+  await withServer(async (baseUrl) => {
+    const joinAlex = await fetch(`${baseUrl}/api/join`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ displayName: "Alex" })
+    });
+    const joinBlair = await fetch(`${baseUrl}/api/join`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ displayName: "Blair" })
+    });
+    const cookieAlex = joinAlex.headers.get("set-cookie");
+    const cookieBlair = joinBlair.headers.get("set-cookie");
+    assert.ok(cookieAlex);
+    assert.ok(cookieBlair);
+
+    const wsModule = await import("ws");
+    const observer = new wsModule.WebSocket(toWsUrl(baseUrl), {
+      headers: { cookie: cookieBlair }
+    });
+    await waitForOpen(observer);
+
+    const systemEvents: string[] = [];
+    observer.on("message", (raw: RawData) => {
+      const parsed = parseSocketEvent(raw) as {
+        type: string;
+        payload?: { displayName?: string; content?: string };
+      };
+      if (parsed.type === "chat/system" && parsed.payload?.displayName === "Alex") {
+        systemEvents.push(String(parsed.payload.content ?? ""));
+      }
+    });
+
+    const first = new wsModule.WebSocket(toWsUrl(baseUrl), {
+      headers: { cookie: cookieAlex }
+    });
+    await waitForOpen(first);
+    const second = new wsModule.WebSocket(toWsUrl(baseUrl), {
+      headers: { cookie: cookieAlex }
+    });
+
+    await waitForOpen(second);
+    await sleep(120);
+
+    second.send(JSON.stringify({ type: "chat/leave" }));
+    await sleep(120);
+
+    assert.equal(systemEvents.filter((event) => event === "joined").length, 1);
+    assert.equal(systemEvents.includes("left"), true);
+
+    first.close();
+    second.close();
+    observer.close();
   });
 });
 
