@@ -55,6 +55,10 @@ function sendSocketEvent(socket: WebSocket, event: ServerEvent): void {
   socket.send(JSON.stringify(event));
 }
 
+function sendInvalidPayload(socket: WebSocket): void {
+  sendSocketEvent(socket, { type: "chat/error", reason: "invalid_payload" });
+}
+
 export async function buildApp(options: BuildOptions): Promise<FastifyInstance> {
   const app = Fastify({ logger: true });
   const managedStoreFromEnv = createManagedTimelineStoreFromEnv();
@@ -184,9 +188,9 @@ export async function buildApp(options: BuildOptions): Promise<FastifyInstance> 
       }
 
       activeConnections.set(participant.id, { participantId: participant.id, socket });
-      void timelineStore
-        .listRecentMessages(RECENT_MESSAGES_LIMIT)
-        .then((recentMessages) => {
+      void (async () => {
+        try {
+          const recentMessages = await timelineStore.listRecentMessages(RECENT_MESSAGES_LIMIT);
           sendSocketEvent(socket, {
             type: "chat/bootstrap",
             payload: {
@@ -196,12 +200,12 @@ export async function buildApp(options: BuildOptions): Promise<FastifyInstance> 
             }
           });
           updatePresence();
-        })
-        .catch((error) => {
+        } catch (error) {
           request.log.error(error, "Failed to bootstrap recent timeline from managed store.");
-          sendSocketEvent(socket, { type: "chat/error", reason: "invalid_payload" });
+          sendInvalidPayload(socket);
           socket.close(1011, "bootstrap_failed");
-        });
+        }
+      })();
 
       socket.on("message", (raw: RawData) => {
         let event: ClientEvent;
@@ -238,15 +242,15 @@ export async function buildApp(options: BuildOptions): Promise<FastifyInstance> 
           timestamp: new Date().toISOString()
         };
 
-        void timelineStore
-          .appendMessage(chatMessage)
-          .then(() => {
-            return realtimeGateway.publishMessage(chatMessage);
-          })
-          .catch((error) => {
+        void (async () => {
+          try {
+            await timelineStore.appendMessage(chatMessage);
+            await realtimeGateway.publishMessage(chatMessage);
+          } catch (error) {
             request.log.error(error, "Failed to persist/publish message via managed backend.");
-            sendSocketEvent(socket, { type: "chat/error", reason: "invalid_payload" });
-          });
+            sendInvalidPayload(socket);
+          }
+        })();
       });
 
       socket.on("close", () => {

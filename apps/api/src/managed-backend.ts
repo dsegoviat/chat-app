@@ -11,6 +11,8 @@ export interface ManagedRealtimeGateway {
   subscribeToMessages(handler: (message: ChatMessage) => void): () => void;
 }
 
+type ManagedProvider = "memory" | "supabase";
+
 type InMemoryTimelineStore = ManagedTimelineStore & {
   listAllMessagesForDebug(): ChatMessage[];
 };
@@ -40,10 +42,9 @@ export function createInMemoryTimelineStore(): InMemoryTimelineStore {
   };
 }
 
-type InMemoryRealtimeGateway = ManagedRealtimeGateway;
 const inMemoryRealtimeSubscribers = new Set<(message: ChatMessage) => void>();
 
-export function createInMemoryRealtimeGateway(): InMemoryRealtimeGateway {
+export function createInMemoryRealtimeGateway(): ManagedRealtimeGateway {
   return {
     async publishMessage(message: ChatMessage): Promise<void> {
       for (const subscriber of inMemoryRealtimeSubscribers) {
@@ -57,6 +58,25 @@ export function createInMemoryRealtimeGateway(): InMemoryRealtimeGateway {
       };
     }
   };
+}
+
+type SupabaseConfig = {
+  url: string;
+  anonKey: string;
+};
+
+function readSupabaseConfig(): SupabaseConfig | null {
+  const url = process.env.SUPABASE_URL;
+  const anonKey = process.env.SUPABASE_ANON_KEY;
+  if (!url || !anonKey) {
+    return null;
+  }
+
+  return { url, anonKey };
+}
+
+function createSupabaseManagedClient(config: SupabaseConfig): SupabaseClient {
+  return createClient(config.url, config.anonKey);
 }
 
 function createSupabaseTimelineStore(client: SupabaseClient): ManagedTimelineStore {
@@ -137,12 +157,10 @@ function createSupabaseRealtimeGateway(client: SupabaseClient): ManagedRealtimeG
 }
 
 export function createManagedTimelineStoreFromEnv():
-  | { store: ManagedTimelineStore; provider: "memory" | "supabase" }
+  | { store: ManagedTimelineStore; provider: ManagedProvider }
   | { store: ManagedTimelineStore; provider: "memory"; warning: string } {
-  const supabaseUrl = process.env.SUPABASE_URL;
-  const supabaseAnonKey = process.env.SUPABASE_ANON_KEY;
-
-  if (!supabaseUrl || !supabaseAnonKey) {
+  const config = readSupabaseConfig();
+  if (!config) {
     return {
       store: createInMemoryTimelineStore(),
       provider: "memory",
@@ -151,7 +169,7 @@ export function createManagedTimelineStoreFromEnv():
     };
   }
 
-  const client = createClient(supabaseUrl, supabaseAnonKey);
+  const client = createSupabaseManagedClient(config);
   return {
     store: createSupabaseTimelineStore(client),
     provider: "supabase"
@@ -159,12 +177,10 @@ export function createManagedTimelineStoreFromEnv():
 }
 
 export function createManagedRealtimeGatewayFromEnv():
-  | { gateway: ManagedRealtimeGateway; provider: "memory" | "supabase" }
+  | { gateway: ManagedRealtimeGateway; provider: ManagedProvider }
   | { gateway: ManagedRealtimeGateway; provider: "memory"; warning: string } {
-  const supabaseUrl = process.env.SUPABASE_URL;
-  const supabaseAnonKey = process.env.SUPABASE_ANON_KEY;
-
-  if (!supabaseUrl || !supabaseAnonKey) {
+  const config = readSupabaseConfig();
+  if (!config) {
     return {
       gateway: createInMemoryRealtimeGateway(),
       provider: "memory",
@@ -173,7 +189,7 @@ export function createManagedRealtimeGatewayFromEnv():
     };
   }
 
-  const client = createClient(supabaseUrl, supabaseAnonKey);
+  const client = createSupabaseManagedClient(config);
   return {
     gateway: createSupabaseRealtimeGateway(client),
     provider: "supabase"
