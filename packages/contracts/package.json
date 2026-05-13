@@ -1,0 +1,14 @@
+{
+  "name": "@chat-app/contracts",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json --emitDeclarationOnly",
+    "typecheck": "tsc -p tsconfig.json",
+    "lint": "tsc -p tsconfig.json"
+  }
+}
