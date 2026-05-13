@@ -11,6 +11,7 @@ export type TimelineMessageKind = "chat" | "system";
 const HANDLE_MIN_LENGTH = 3;
 const HANDLE_MAX_LENGTH = 20;
 const HANDLE_PATTERN = /^[a-z][a-z0-9_-]{2,19}$/;
+const TIMELINE_PREFERENCES_STORAGE_KEY = "chat.timeline.preferences.v1";
 
 const HANDLE_COLORS = [
   "#60a5fa",
@@ -33,8 +34,8 @@ export const DEFAULT_TIMELINE_PREFERENCES: TimelinePreferences = {
   showSystemEvents: true
 };
 
-const adjectives = ["steady", "bold", "rapid", "bright", "calm", "lucky", "quick", "solar"];
-const names = ["falcon", "otter", "cedar", "tiger", "sable", "ember", "raven", "atlas"];
+const HANDLE_ADJECTIVES = ["steady", "bold", "rapid", "bright", "calm", "lucky", "quick", "solar"];
+const HANDLE_NAMES = ["falcon", "otter", "cedar", "tiger", "sable", "ember", "raven", "atlas"];
 
 export function mergeMessagesByOrder(
   current: ChatMessage[],
@@ -139,7 +140,7 @@ export function loadTimelinePreferences(): TimelinePreferences {
     return DEFAULT_TIMELINE_PREFERENCES;
   }
 
-  const raw = window.localStorage.getItem("chat.timeline.preferences.v1");
+  const raw = window.localStorage.getItem(TIMELINE_PREFERENCES_STORAGE_KEY);
   if (!raw) {
     return DEFAULT_TIMELINE_PREFERENCES;
   }
@@ -160,7 +161,7 @@ export function saveTimelinePreferences(preferences: TimelinePreferences): void 
     return;
   }
 
-  window.localStorage.setItem("chat.timeline.preferences.v1", JSON.stringify(preferences));
+  window.localStorage.setItem(TIMELINE_PREFERENCES_STORAGE_KEY, JSON.stringify(preferences));
 }
 
 export function getHandleColor(displayName: string): string {
@@ -179,8 +180,8 @@ export function sortHandles(handles: string[]): string[] {
 }
 
 export function createRandomHandle(): string {
-  const adjective = adjectives[Math.floor(Math.random() * adjectives.length)];
-  const name = names[Math.floor(Math.random() * names.length)];
+  const adjective = HANDLE_ADJECTIVES[Math.floor(Math.random() * HANDLE_ADJECTIVES.length)];
+  const name = HANDLE_NAMES[Math.floor(Math.random() * HANDLE_NAMES.length)];
   const suffix = String(Math.floor(Math.random() * 1000)).padStart(3, "0");
   return `${adjective}-${name}-${suffix}`;
 }

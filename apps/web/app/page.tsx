@@ -2,7 +2,12 @@
 
 import { useEffect, useRef, useState } from "react";
 
-import type { BootstrapResponse, ChatMessage, ServerEvent } from "@chat-app/contracts";
+import type {
+  BootstrapResponse,
+  ChatMessage,
+  ServerEvent,
+  SystemEventMessage
+} from "@chat-app/contracts";
 import { MESSAGE_MAX_LENGTH } from "@chat-app/contracts";
 import {
   canSubmitJoin,
@@ -30,9 +35,7 @@ export default function HomePage() {
   const [showParticipants, setShowParticipants] = useState(false);
   const [presenceCount, setPresenceCount] = useState(0);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
-  const [systemMessages, setSystemMessages] = useState<
-    Array<{ id: string; displayName: string; content: "joined" | "left"; timestamp: string }>
-  >([]);
+  const [systemMessages, setSystemMessages] = useState<SystemEventMessage[]>([]);
   const [draft, setDraft] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [replaced, setReplaced] = useState(false);
@@ -58,19 +61,19 @@ export default function HomePage() {
   const connectSocket = () => {
     const socket = new WebSocket(websocketUrl);
     wsRef.current = socket;
+    const addSeenParticipant = (name: string) => {
+      setParticipantsSeen((current) => sortHandles([...new Set([...current, name])]));
+    };
 
     socket.onmessage = (event) => {
       const serverEvent = JSON.parse(event.data) as ServerEvent;
 
       switch (serverEvent.type) {
         case "chat/bootstrap": {
-          const payload = serverEvent.payload as BootstrapResponse;
-          setMessages((current) => mergeMessagesByOrder(current, payload.recentMessages));
-          setPresenceCount(payload.presenceCount);
-          setParticipantName(payload.participant.displayName);
-          setParticipantsSeen((current) =>
-            sortHandles([...new Set([...current, payload.participant.displayName])])
-          );
+          setMessages((current) => mergeMessagesByOrder(current, serverEvent.payload.recentMessages));
+          setPresenceCount(serverEvent.payload.presenceCount);
+          setParticipantName(serverEvent.payload.participant.displayName);
+          addSeenParticipant(serverEvent.payload.participant.displayName);
           break;
         }
         case "chat/presence":
@@ -78,15 +81,11 @@ export default function HomePage() {
           break;
         case "chat/message":
           setMessages((current) => mergeMessagesByOrder(current, serverEvent.payload));
-          setParticipantsSeen((current) =>
-            sortHandles([...new Set([...current, serverEvent.payload.displayName])])
-          );
+          addSeenParticipant(serverEvent.payload.displayName);
           break;
         case "chat/system":
           setSystemMessages((current) => [...current, serverEvent.payload]);
-          setParticipantsSeen((current) =>
-            sortHandles([...new Set([...current, serverEvent.payload.displayName])])
-          );
+          addSeenParticipant(serverEvent.payload.displayName);
           break;
         case "chat/error":
           if (serverEvent.reason.startsWith("display_name_")) {

@@ -85,6 +85,19 @@ function sendInvalidPayload(socket: WebSocket): void {
   sendSocketEvent(socket, { type: "chat/error", reason: "invalid_payload" });
 }
 
+function createSystemEvent(
+  participant: Participant,
+  content: SystemEventMessage["content"]
+): SystemEventMessage {
+  return {
+    id: randomUUID(),
+    participantId: participant.id,
+    displayName: participant.displayName,
+    content,
+    timestamp: new Date().toISOString()
+  };
+}
+
 function sendJoinError(
   reply: FastifyReply,
   statusCode: number,
@@ -239,14 +252,7 @@ export async function buildApp(options: BuildOptions): Promise<FastifyInstance> 
 
       activeConnections.set(participant.id, { participantId: participant.id, socket });
       if (!isReplacement) {
-        const joinedEvent: SystemEventMessage = {
-          id: randomUUID(),
-          participantId: participant.id,
-          displayName: participant.displayName,
-          content: "joined",
-          timestamp: new Date().toISOString()
-        };
-        broadcast({ type: "chat/system", payload: joinedEvent });
+        broadcast({ type: "chat/system", payload: createSystemEvent(participant, "joined") });
       }
 
       void (async () => {
@@ -322,14 +328,7 @@ export async function buildApp(options: BuildOptions): Promise<FastifyInstance> 
         const currentConnection = activeConnections.get(participant.id);
         if (currentConnection?.socket === socket) {
           activeConnections.delete(participant.id);
-          const leftEvent: SystemEventMessage = {
-            id: randomUUID(),
-            participantId: participant.id,
-            displayName: participant.displayName,
-            content: "left",
-            timestamp: new Date().toISOString()
-          };
-          broadcast({ type: "chat/system", payload: leftEvent });
+          broadcast({ type: "chat/system", payload: createSystemEvent(participant, "left") });
           updatePresence();
         }
       });
