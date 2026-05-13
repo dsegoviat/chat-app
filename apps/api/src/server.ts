@@ -1,4 +1,4 @@
-import "dotenv/config";
+import { config as loadEnv } from "dotenv";
 
 import cookie from "@fastify/cookie";
 import cors from "@fastify/cors";
@@ -17,6 +17,9 @@ import type {
 import { MESSAGE_MAX_LENGTH, RECENT_MESSAGES_LIMIT } from "@chat-app/contracts";
 import Fastify, { type FastifyInstance } from "fastify";
 import { randomUUID } from "node:crypto";
+import { existsSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { type RawData, WebSocket } from "ws";
 import {
   createManagedPresenceProjectionFromEnv,
@@ -26,6 +29,16 @@ import {
   type ManagedRealtimeGateway,
   type ManagedTimelineStore
 } from "./managed-backend";
+
+const currentDir = dirname(fileURLToPath(import.meta.url));
+const apiRootDir = resolve(currentDir, "..");
+const workspaceRootDir = resolve(apiRootDir, "..", "..");
+
+for (const envPath of [resolve(workspaceRootDir, ".env"), resolve(apiRootDir, ".env")]) {
+  if (existsSync(envPath)) {
+    loadEnv({ path: envPath });
+  }
+}
 
 type ActiveConnection = {
   participantId: string;

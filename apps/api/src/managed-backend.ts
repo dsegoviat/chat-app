@@ -198,10 +198,19 @@ function createSupabaseTimelineStore(client: SupabaseClient): ManagedTimelineSto
 function createSupabaseRealtimeGateway(client: SupabaseClient): ManagedRealtimeGateway {
   const channelName = "chat-room";
   const eventName = "chat_message";
+  const channel = client.channel(channelName, {
+    config: {
+      broadcast: {
+        self: true
+      }
+    }
+  });
+
+  void channel.subscribe();
 
   return {
     async publishMessage(message: ChatMessage): Promise<void> {
-      const status = await client.channel(channelName).send({
+      const status = await channel.send({
         type: "broadcast",
         event: eventName,
         payload: message
@@ -212,13 +221,11 @@ function createSupabaseRealtimeGateway(client: SupabaseClient): ManagedRealtimeG
       }
     },
     subscribeToMessages(handler: (message: ChatMessage) => void): () => void {
-      const channel = client.channel(channelName);
       channel.on("broadcast", { event: eventName }, ({ payload }: { payload: unknown }) => {
         if (payload && typeof payload === "object") {
           handler(payload as ChatMessage);
         }
       });
-      void channel.subscribe();
 
       return () => {
         void client.removeChannel(channel);
