@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { type RawData } from "ws";
+import { type RawData, type WebSocket } from "ws";
 
 import { buildApp } from "./server";
 
@@ -19,6 +19,25 @@ async function withServer(run: (url: string) => Promise<void>): Promise<void> {
   } finally {
     await app.close();
   }
+}
+
+function toWsUrl(baseUrl: string): string {
+  return `${baseUrl.replace("http", "ws")}/ws`;
+}
+
+function parseSocketEvent(raw: RawData): { type: string; [key: string]: unknown } {
+  return JSON.parse(raw.toString()) as { type: string; [key: string]: unknown };
+}
+
+function waitForOpen(socket: WebSocket): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    socket.on("open", resolve);
+    socket.on("error", reject);
+  });
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 test("join sets session cookie and bootstrap returns participant", async () => {
@@ -60,7 +79,7 @@ test("message pipeline enforces validation, order, and recent replay cap", async
     assert.ok(cookie);
 
     const wsModule = await import("ws");
-    const socket = new wsModule.WebSocket(`${baseUrl.replace("http", "ws")}/ws`, {
+    const socket = new wsModule.WebSocket(toWsUrl(baseUrl), {
       headers: {
         cookie
       }
@@ -68,13 +87,8 @@ test("message pipeline enforces validation, order, and recent replay cap", async
 
     const messages: Array<Record<string, unknown>> = [];
     const errors: Array<Record<string, unknown>> = [];
-    const connected = new Promise<void>((resolve, reject) => {
-      socket.on("open", () => resolve());
-      socket.on("error", reject);
-    });
-
     socket.on("message", (raw: RawData) => {
-      const parsed = JSON.parse(raw.toString()) as { type: string };
+      const parsed = parseSocketEvent(raw);
       if (parsed.type === "chat/message") {
         messages.push(parsed as Record<string, unknown>);
       }
@@ -83,7 +97,7 @@ test("message pipeline enforces validation, order, and recent replay cap", async
       }
     });
 
-    await connected;
+    await waitForOpen(socket);
     socket.send(JSON.stringify({ type: "chat/send", content: "   " }));
     socket.send(JSON.stringify({ type: "chat/send", content: "x".repeat(201) }));
     socket.send(JSON.stringify({ type: "chat/send", content: "hello" }));
@@ -92,7 +106,7 @@ test("message pipeline enforces validation, order, and recent replay cap", async
       socket.send(JSON.stringify({ type: "chat/send", content: `m-${i}` }));
     }
 
-    await new Promise((resolve) => setTimeout(resolve, 200));
+    await sleep(200);
 
     const errorReasons = errors.map((event) => String(event.reason ?? ""));
     assert.ok(errorReasons.includes("message_blank"));
@@ -145,10 +159,10 @@ test("all participants observe the same server message order", async () => {
     assert.ok(cookieA);
     assert.ok(cookieB);
 
-    const socketA = new wsModule.WebSocket(`${baseUrl.replace("http", "ws")}/ws`, {
+    const socketA = new wsModule.WebSocket(toWsUrl(baseUrl), {
       headers: { cookie: cookieA }
     });
-    const socketB = new wsModule.WebSocket(`${baseUrl.replace("http", "ws")}/ws`, {
+    const socketB = new wsModule.WebSocket(toWsUrl(baseUrl), {
       headers: { cookie: cookieB }
     });
 
@@ -156,7 +170,7 @@ test("all participants observe the same server message order", async () => {
     const seenByB: Array<{ order: number; content: string }> = [];
 
     socketA.on("message", (raw: RawData) => {
-      const parsed = JSON.parse(raw.toString()) as {
+      const parsed = parseSocketEvent(raw) as {
         type: string;
         payload?: { order: number; content: string };
       };
@@ -166,7 +180,7 @@ test("all participants observe the same server message order", async () => {
     });
 
     socketB.on("message", (raw: RawData) => {
-      const parsed = JSON.parse(raw.toString()) as {
+      const parsed = parseSocketEvent(raw) as {
         type: string;
         payload?: { order: number; content: string };
       };
@@ -175,22 +189,13 @@ test("all participants observe the same server message order", async () => {
       }
     });
 
-    await Promise.all([
-      new Promise<void>((resolve, reject) => {
-        socketA.on("open", resolve);
-        socketA.on("error", reject);
-      }),
-      new Promise<void>((resolve, reject) => {
-        socketB.on("open", resolve);
-        socketB.on("error", reject);
-      })
-    ]);
+    await Promise.all([waitForOpen(socketA), waitForOpen(socketB)]);
 
     socketA.send(JSON.stringify({ type: "chat/send", content: "first-from-a" }));
     socketB.send(JSON.stringify({ type: "chat/send", content: "second-from-b" }));
     socketA.send(JSON.stringify({ type: "chat/send", content: "third-from-a" }));
 
-    await new Promise((resolve) => setTimeout(resolve, 200));
+    await sleep(200);
 
     assert.equal(seenByA.length, 3);
     assert.equal(seenByB.length, 3);
@@ -223,13 +228,13 @@ test("new websocket replaces old active connection", async () => {
     assert.ok(cookie);
 
     const wsModule = await import("ws");
-    const first = new wsModule.WebSocket(`${baseUrl.replace("http", "ws")}/ws`, {
+    const first = new wsModule.WebSocket(toWsUrl(baseUrl), {
       headers: { cookie }
     });
 
     const firstReplaced = new Promise<void>((resolve, reject) => {
       first.on("message", (raw: RawData) => {
-        const event = JSON.parse(raw.toString()) as { type: string };
+        const event = parseSocketEvent(raw);
         if (event.type === "chat/replaced") {
           resolve();
         }
@@ -237,19 +242,13 @@ test("new websocket replaces old active connection", async () => {
       first.on("error", reject);
     });
 
-    await new Promise<void>((resolve, reject) => {
-      first.on("open", () => resolve());
-      first.on("error", reject);
-    });
+    await waitForOpen(first);
 
-    const second = new wsModule.WebSocket(`${baseUrl.replace("http", "ws")}/ws`, {
+    const second = new wsModule.WebSocket(toWsUrl(baseUrl), {
       headers: { cookie }
     });
 
-    await new Promise<void>((resolve, reject) => {
-      second.on("open", () => resolve());
-      second.on("error", reject);
-    });
+    await waitForOpen(second);
 
     await firstReplaced;
 

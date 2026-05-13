@@ -16,7 +16,11 @@ function mergeMessagesByOrder(
   const nextMessages = Array.isArray(incoming) ? incoming : [incoming];
   const byId = new Map<string, ChatMessage>();
 
-  for (const message of [...current, ...nextMessages]) {
+  for (const message of current) {
+    byId.set(message.id, message);
+  }
+
+  for (const message of nextMessages) {
     byId.set(message.id, message);
   }
 
@@ -51,7 +55,7 @@ export default function HomePage() {
 
       switch (serverEvent.type) {
         case "chat/bootstrap": {
-          const payload: BootstrapResponse = serverEvent.payload;
+          const payload = serverEvent.payload as BootstrapResponse;
           setMessages((current) => mergeMessagesByOrder(current, payload.recentMessages));
           setPresenceCount(payload.presenceCount);
           setParticipantName(payload.participant.displayName);
