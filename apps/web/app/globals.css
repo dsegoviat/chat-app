@@ -3,14 +3,14 @@
 @tailwind utilities;
 
 :root {
-  --background: 0 0% 100%;
-  --foreground: 240 10% 4%;
-  --card: 0 0% 100%;
-  --card-foreground: 240 10% 4%;
-  --primary: 240 6% 10%;
-  --primary-foreground: 0 0% 98%;
-  --border: 240 6% 90%;
-  --input: 240 6% 90%;
+  --background: 0 0% 4%;
+  --foreground: 0 0% 96%;
+  --card: 0 0% 8%;
+  --card-foreground: 0 0% 96%;
+  --primary: 0 0% 96%;
+  --primary-foreground: 0 0% 4%;
+  --border: 0 0% 24%;
+  --input: 0 0% 24%;
   --radius: 0.6rem;
 }
 
@@ -19,5 +19,5 @@
 }
 
 body {
-  @apply bg-background text-foreground;
+  @apply min-h-screen bg-background text-foreground;
 }

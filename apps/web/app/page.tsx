@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { Dice5, LogOut, Users } from "lucide-react";
 
 import type {
   BootstrapResponse,
@@ -106,39 +107,44 @@ export default function HomePage() {
     setError(null);
     setJoinState("joining");
 
-    const response = await fetch(`${apiBaseUrl}/api/join`, {
-      method: "POST",
-      credentials: "include",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ displayName })
-    });
+    try {
+      const response = await fetch(`${apiBaseUrl}/api/join`, {
+        method: "POST",
+        credentials: "include",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ displayName })
+      });
 
-    if (!response.ok) {
+      if (!response.ok) {
+        setJoinState("idle");
+        const payload = (await response.json().catch(() => null)) as { error?: string } | null;
+        setError(getJoinErrorMessage(payload?.error ?? ""));
+        return;
+      }
+
+      const bootstrap = await fetch(`${apiBaseUrl}/api/bootstrap`, {
+        credentials: "include"
+      });
+
+      if (!bootstrap.ok) {
+        setJoinState("idle");
+        setError("Failed to bootstrap room");
+        return;
+      }
+
+      const payload = (await bootstrap.json()) as BootstrapResponse;
+      setParticipantName(payload.participant.displayName);
+      setParticipantsSeen(sortHandles([payload.participant.displayName]));
+      setPresenceCount(payload.presenceCount);
+      setMessages(mergeMessagesByOrder([], payload.recentMessages));
+      setSystemMessages([]);
+      setJoinState("joined");
+      setReplaced(false);
+      connectSocket();
+    } catch {
       setJoinState("idle");
-      const payload = (await response.json().catch(() => null)) as { error?: string } | null;
-      setError(getJoinErrorMessage(payload?.error ?? ""));
-      return;
+      setError("Unable to reach chat API. Ensure the API server is running and try again.");
     }
-
-    const bootstrap = await fetch(`${apiBaseUrl}/api/bootstrap`, {
-      credentials: "include"
-    });
-
-    if (!bootstrap.ok) {
-      setJoinState("idle");
-      setError("Failed to bootstrap room");
-      return;
-    }
-
-    const payload = (await bootstrap.json()) as BootstrapResponse;
-    setParticipantName(payload.participant.displayName);
-    setParticipantsSeen(sortHandles([payload.participant.displayName]));
-    setPresenceCount(payload.presenceCount);
-    setMessages(mergeMessagesByOrder([], payload.recentMessages));
-    setSystemMessages([]);
-    setJoinState("joined");
-    setReplaced(false);
-    connectSocket();
   };
 
   const sendMessage = () => {
@@ -166,7 +172,12 @@ export default function HomePage() {
     setReplaced(false);
   };
 
+  const draftLength = draft.trim().length;
+  const isOverMessageLimit = draftLength > MESSAGE_MAX_LENGTH;
+  const isSendDisabled = replaced || draftLength === 0 || isOverMessageLimit;
+
   const joinValidationError = getHandleValidationError(displayName);
+  const shouldShowJoinValidationError = displayName.trim().length > 0;
 
   if (joinState !== "joined") {
     return (
@@ -175,7 +186,7 @@ export default function HomePage() {
         <div className="flex items-center gap-2">
           <input
             className="flex-1 rounded border border-neutral-700 bg-neutral-900 px-3 py-2"
-            placeholder="Handle"
+            placeholder="john-doe"
             value={displayName}
             onChange={(event) => setDisplayName(event.target.value)}
             onKeyDown={(event) => {
@@ -186,19 +197,21 @@ export default function HomePage() {
           />
           <button
             aria-label="Generate random handle"
-            className="rounded border border-neutral-700 px-3 py-2"
+            className="inline-flex h-10 w-10 shrink-0 items-center justify-center rounded border border-neutral-700 text-neutral-300"
             onClick={() => {
               setDisplayName(createRandomHandle());
               setError(null);
             }}
             type="button"
           >
-            🎲
+            <Dice5 className="h-4 w-4" />
           </button>
         </div>
-        {joinValidationError ? <p className="text-sm text-amber-300">{joinValidationError}</p> : null}
+        {shouldShowJoinValidationError && joinValidationError ? (
+          <p className="text-sm text-amber-300">{joinValidationError}</p>
+        ) : null}
         <button
-          className="rounded bg-blue-500 px-3 py-2 font-semibold text-neutral-950 disabled:opacity-40"
+          className="rounded bg-neutral-100 px-3 py-2 font-semibold text-neutral-950 disabled:opacity-40"
           disabled={!canSubmitJoin(displayName, joinState)}
           onClick={join}
           type="button"
@@ -226,13 +239,19 @@ export default function HomePage() {
         </div>
         <div className="flex items-center gap-3">
           <button
-            className="text-sm text-neutral-300"
+            className="inline-flex items-center gap-2 rounded-full border border-neutral-700 px-3 py-1 text-sm text-neutral-200"
             onClick={() => setShowParticipants((current) => !current)}
             type="button"
           >
-            👤 {presenceCount}
+            <Users className="h-4 w-4" />
+            {presenceCount}
           </button>
-          <button className="rounded border border-neutral-700 px-2 py-1 text-sm" onClick={leave} type="button">
+          <button
+            className="inline-flex items-center gap-2 rounded border border-red-700 bg-red-950 px-2 py-1 text-sm text-red-200"
+            onClick={leave}
+            type="button"
+          >
+            <LogOut className="h-4 w-4" />
             Leave
           </button>
         </div>
@@ -299,23 +318,24 @@ export default function HomePage() {
         <input
           className="flex-1 rounded border border-neutral-700 bg-neutral-900 px-3 py-2"
           disabled={replaced}
-          maxLength={MESSAGE_MAX_LENGTH}
           onChange={(event) => setDraft(event.target.value)}
           onKeyDown={(event) => {
             if (event.key === "Enter") {
               event.preventDefault();
-              sendMessage();
+              if (!isSendDisabled) {
+                sendMessage();
+              }
             }
           }}
           placeholder="Type a message"
           value={draft}
         />
-        <p className="self-center text-xs text-neutral-400">
-          {draft.length}/{MESSAGE_MAX_LENGTH}
+        <p className={`self-center text-xs ${isOverMessageLimit ? "text-red-500" : "text-neutral-400"}`}>
+          {draftLength}/{MESSAGE_MAX_LENGTH}
         </p>
         <button
-          className="rounded bg-blue-500 px-3 py-2 font-semibold text-neutral-950 disabled:opacity-40"
-          disabled={replaced}
+          className="rounded bg-neutral-100 px-3 py-2 font-semibold text-neutral-950 disabled:opacity-40"
+          disabled={isSendDisabled}
           onClick={sendMessage}
           type="button"
         >

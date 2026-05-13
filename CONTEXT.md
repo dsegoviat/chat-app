@@ -73,7 +73,7 @@ A 5-minute period after unintentional disconnect where the same session-bound id
 _Avoid_: Persistent reservation, cross-identity handle lock
 
 **Message**:
-A chat entry sent by a participant to the room, limited to 200 characters.
+A chat entry sent by a participant to the room, limited to 200 characters after trim.
 _Avoid_: Post, comment, payload
 
 **Message Order**:
@@ -111,6 +111,10 @@ _Avoid_: Shift+Enter newline, multiline composer
 **Composer Limit Indicator**:
 Composer-side character count displayed as used/max (for example `58/200`) in the same row as the send action.
 _Avoid_: Remaining-only counter, separate secondary row by default
+
+**Composer Soft Limit Feedback**:
+Composer behavior where typing may exceed the max length, but submission is blocked; the send action disables and the used/max indicator turns red when over limit.
+_Avoid_: Hard input truncation, hidden overflow state
 
 **UI Application**:
 The frontend Node application that renders chat screens and interacts with the backend over network APIs.
@@ -185,6 +189,7 @@ _Avoid_: Shared backend internals, direct runtime coupling
 - **Handle Color Mapping** uses canonical lowercased handle input for hashing
 - **Composer Submission** is Enter-to-send with no multiline mode
 - **Composer Limit Indicator** uses used/max and sits in the composer row
+- **Composer Soft Limit Feedback** applies at message lengths above 200 characters
 - The **UI Application** and **API Application** communicate only via network APIs
 - Both applications consume the **Contracts Package** for shared type definitions
 - The current **Fastify API** acts as **Migration Runtime** until managed backend parity is reached
@@ -229,6 +234,7 @@ _Avoid_: Shared backend internals, direct runtime coupling
 - "username color randomness" was open — resolved with deterministic client-side **Handle Color Mapping**.
 - "enter behavior" was open — resolved with single-line **Composer Submission**.
 - "char limit presentation" was open — resolved with in-row **Composer Limit Indicator** in used/max format.
+- "composer over-limit input" was open — resolved with **Composer Soft Limit Feedback** (allow typing over limit; disable send + red used/max).
 - "system-event toggle semantics" was open — resolved: toggle is render-only while persistence/order stay intact.
 - "minimal Vercel deployment" was open — resolved target is Vercel UI with a managed backend platform (Supabase) for data + realtime.
 - "Fastify target role" was open — resolved: Fastify is temporary **Migration Runtime** and removed after migration completion.
