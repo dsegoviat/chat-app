@@ -40,6 +40,30 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function collectPresenceAndMessages(socket: WebSocket): {
+  presence: number[];
+  messages: Array<{ content: string }>;
+} {
+  const presence: number[] = [];
+  const messages: Array<{ content: string }> = [];
+
+  socket.on("message", (raw: RawData) => {
+    const event = parseSocketEvent(raw) as {
+      type: string;
+      presenceCount?: number;
+      payload?: { content?: string };
+    };
+    if (event.type === "chat/presence" && typeof event.presenceCount === "number") {
+      presence.push(event.presenceCount);
+    }
+    if (event.type === "chat/message" && event.payload?.content) {
+      messages.push({ content: event.payload.content });
+    }
+  });
+
+  return { presence, messages };
+}
+
 test("join sets session cookie and bootstrap returns participant", async () => {
   const app = await buildApp({ webOrigin: "http://localhost:3000" });
 
@@ -272,21 +296,7 @@ test("late join receives recent replay and presence reflects connection lifecycl
     const socketAlex = new wsModule.WebSocket(toWsUrl(baseUrl), {
       headers: { cookie: cookieAlex }
     });
-    const alexPresence: number[] = [];
-    const alexMessages: Array<{ content: string }> = [];
-    socketAlex.on("message", (raw: RawData) => {
-      const event = parseSocketEvent(raw) as {
-        type: string;
-        presenceCount?: number;
-        payload?: { content?: string };
-      };
-      if (event.type === "chat/presence" && typeof event.presenceCount === "number") {
-        alexPresence.push(event.presenceCount);
-      }
-      if (event.type === "chat/message" && event.payload?.content) {
-        alexMessages.push({ content: event.payload.content });
-      }
-    });
+    const { presence: alexPresence } = collectPresenceAndMessages(socketAlex);
 
     await waitForOpen(socketAlex);
     socketAlex.send(JSON.stringify({ type: "chat/send", content: "a-1" }));
@@ -316,21 +326,9 @@ test("late join receives recent replay and presence reflects connection lifecycl
     const socketBlair = new wsModule.WebSocket(toWsUrl(baseUrl), {
       headers: { cookie: cookieBlair }
     });
-    const blairPresence: number[] = [];
-    const blairMessages: Array<{ content: string }> = [];
-    socketBlair.on("message", (raw: RawData) => {
-      const event = parseSocketEvent(raw) as {
-        type: string;
-        presenceCount?: number;
-        payload?: { content?: string };
-      };
-      if (event.type === "chat/presence" && typeof event.presenceCount === "number") {
-        blairPresence.push(event.presenceCount);
-      }
-      if (event.type === "chat/message" && event.payload?.content) {
-        blairMessages.push({ content: event.payload.content });
-      }
-    });
+    const { presence: blairPresence, messages: blairMessages } = collectPresenceAndMessages(
+      socketBlair
+    );
 
     await waitForOpen(socketBlair);
     await sleep(100);
