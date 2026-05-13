@@ -1,39 +1,189 @@
-import type { ApiStatusResponse } from "@chat-app/contracts";
+"use client";
 
-import { Button } from "@/components/ui/button";
+import { useEffect, useMemo, useRef, useState } from "react";
 
-const apiBaseUrl = process.env.API_BASE_URL ?? "http://localhost:4000";
+import type { BootstrapResponse, ChatMessage, ServerEvent } from "@chat-app/contracts";
+import { MESSAGE_MAX_LENGTH } from "@chat-app/contracts";
 
-async function getStatus(): Promise<ApiStatusResponse> {
-  const response = await fetch(`${apiBaseUrl}/api/status`, {
-    cache: "no-store"
-  });
+const apiBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:4000";
 
-  if (!response.ok) {
-    throw new Error("Failed to reach API Application");
+type JoinState = "idle" | "joining" | "joined";
+
+export default function HomePage() {
+  const [joinState, setJoinState] = useState<JoinState>("idle");
+  const [displayName, setDisplayName] = useState("");
+  const [participantName, setParticipantName] = useState("");
+  const [presenceCount, setPresenceCount] = useState(0);
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [draft, setDraft] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [replaced, setReplaced] = useState(false);
+  const wsRef = useRef<WebSocket | null>(null);
+
+  const websocketUrl = useMemo(() => apiBaseUrl.replace("http", "ws") + "/ws", []);
+
+  useEffect(() => {
+    return () => {
+      wsRef.current?.close();
+    };
+  }, []);
+
+  const connectSocket = () => {
+    const ws = new WebSocket(websocketUrl);
+    wsRef.current = ws;
+
+    ws.onmessage = (event) => {
+      const parsed = JSON.parse(event.data) as ServerEvent;
+
+      if (parsed.type === "chat/bootstrap") {
+        const payload = parsed.payload as BootstrapResponse;
+        setMessages(payload.recentMessages);
+        setPresenceCount(payload.presenceCount);
+        setParticipantName(payload.participant.displayName);
+      }
+
+      if (parsed.type === "chat/presence") {
+        setPresenceCount(parsed.presenceCount);
+      }
+
+      if (parsed.type === "chat/message") {
+        setMessages((current) => [...current, parsed.payload]);
+      }
+
+      if (parsed.type === "chat/error") {
+        setError(parsed.reason);
+      }
+
+      if (parsed.type === "chat/replaced") {
+        setReplaced(true);
+        ws.close();
+      }
+    };
+  };
+
+  const join = async () => {
+    setError(null);
+    setJoinState("joining");
+
+    const response = await fetch(`${apiBaseUrl}/api/join`, {
+      method: "POST",
+      credentials: "include",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ displayName })
+    });
+
+    if (!response.ok) {
+      setJoinState("idle");
+      setError("Failed to join room");
+      return;
+    }
+
+    const bootstrap = await fetch(`${apiBaseUrl}/api/bootstrap`, {
+      credentials: "include"
+    });
+
+    if (!bootstrap.ok) {
+      setJoinState("idle");
+      setError("Failed to bootstrap room");
+      return;
+    }
+
+    const payload = (await bootstrap.json()) as BootstrapResponse;
+    setParticipantName(payload.participant.displayName);
+    setPresenceCount(payload.presenceCount);
+    setMessages(payload.recentMessages);
+    setJoinState("joined");
+    setReplaced(false);
+    connectSocket();
+  };
+
+  const sendMessage = () => {
+    const trimmed = draft.trim();
+    if (!trimmed) {
+      setError("Message cannot be blank");
+      return;
+    }
+    if (trimmed.length > MESSAGE_MAX_LENGTH) {
+      setError(`Message must be ${MESSAGE_MAX_LENGTH} chars or fewer`);
+      return;
+    }
+
+    wsRef.current?.send(JSON.stringify({ type: "chat/send", content: trimmed }));
+    setDraft("");
+    setError(null);
+  };
+
+  if (joinState !== "joined") {
+    return (
+      <main className="mx-auto flex min-h-screen w-full max-w-xl flex-col justify-center gap-4 px-6">
+        <h1 className="text-3xl font-semibold">Live Event Chat</h1>
+        <p className="text-neutral-600">Join the single room with your display name.</p>
+        <input
+          className="rounded border border-neutral-300 px-3 py-2"
+          placeholder="Display name"
+          value={displayName}
+          onChange={(event) => setDisplayName(event.target.value)}
+        />
+        <button
+          className="rounded bg-black px-3 py-2 text-white disabled:opacity-40"
+          disabled={joinState === "joining"}
+          onClick={join}
+          type="button"
+        >
+          {joinState === "joining" ? "Joining..." : "Join Room"}
+        </button>
+        {error ? <p className="text-red-600">{error}</p> : null}
+      </main>
+    );
   }
 
-  return (await response.json()) as ApiStatusResponse;
-}
-
-export default async function HomePage() {
-  const status = await getStatus();
-
   return (
-    <main className="mx-auto flex min-h-screen w-full max-w-3xl flex-col justify-center gap-6 px-6">
-      <div className="space-y-2">
-        <p className="text-sm uppercase tracking-widest text-neutral-500">
-          Turborepo Foundation
-        </p>
-        <h1 className="text-3xl font-semibold">UI Application is connected</h1>
-        <p className="text-neutral-600">
-          API service: <strong>{status.service}</strong> | status: <strong>{status.status}</strong>
-        </p>
-        <p className="text-neutral-600">Server timestamp: {status.timestamp}</p>
-      </div>
-      <div>
-        <Button variant="outline">shadcn/ui is configured</Button>
-      </div>
+    <main className="mx-auto flex min-h-screen w-full max-w-3xl flex-col gap-4 px-6 py-8">
+      <header className="flex items-end justify-between border-b border-neutral-200 pb-3">
+        <div>
+          <h1 className="text-2xl font-semibold">Room</h1>
+          <p className="text-neutral-600">Signed in as {participantName}</p>
+        </div>
+        <p className="text-sm text-neutral-600">Presence: {presenceCount}</p>
+      </header>
+
+      {replaced ? (
+        <div className="rounded border border-amber-400 bg-amber-50 px-3 py-2 text-amber-900">
+          This tab was replaced by a newer active tab for your session.
+        </div>
+      ) : null}
+
+      <section className="flex-1 space-y-2 overflow-y-auto">
+        {messages.map((message) => (
+          <article className="rounded border border-neutral-200 p-3" key={message.id}>
+            <p className="text-sm text-neutral-600">
+              #{message.order} {message.displayName}
+            </p>
+            <p>{message.content}</p>
+          </article>
+        ))}
+      </section>
+
+      <footer className="flex gap-2 border-t border-neutral-200 pt-3">
+        <input
+          className="flex-1 rounded border border-neutral-300 px-3 py-2"
+          disabled={replaced}
+          maxLength={MESSAGE_MAX_LENGTH}
+          onChange={(event) => setDraft(event.target.value)}
+          placeholder="Type a message"
+          value={draft}
+        />
+        <button
+          className="rounded bg-black px-3 py-2 text-white disabled:opacity-40"
+          disabled={replaced}
+          onClick={sendMessage}
+          type="button"
+        >
+          Send
+        </button>
+      </footer>
+
+      {error ? <p className="text-red-600">{error}</p> : null}
     </main>
   );
 }

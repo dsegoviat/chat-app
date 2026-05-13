@@ -6,8 +6,9 @@
     "dev": "turbo dev",
     "build": "turbo build",
     "lint": "turbo lint",
-    "typecheck": "turbo typecheck",
-    "ralph": "pnpm exec tsx .sandcastle/main.mts"
+    "typecheck": "TURBO_CACHE_DIR=.turbo turbo typecheck",
+    "ralph": "pnpm exec tsx .sandcastle/main.mts",
+    "test": "TURBO_CACHE_DIR=.turbo turbo test"
   },
   "devDependencies": {
     "@ai-hero/sandcastle": "file:ai-hero-sandcastle-0.5.9.tgz",
