@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import type { ChatMessage } from "@chat-app/contracts";
+import { MESSAGE_MAX_LENGTH, type ChatMessage } from "@chat-app/contracts";
 
 import { canSubmitJoin, getComposerError, mergeMessagesByOrder } from "./chat-flow";
 
-function message(id: string, order: number, content: string): ChatMessage {
+function createMessage(id: string, order: number, content: string): ChatMessage {
   return {
     id,
     order,
@@ -24,8 +24,12 @@ test("ui smoke: join action only enables with non-blank display name", () => {
 });
 
 test("ui smoke: timeline merge deduplicates by id and preserves server order", () => {
-  const current = [message("m-2", 2, "two"), message("m-4", 4, "four")];
-  const replay = [message("m-1", 1, "one"), message("m-3", 3, "three"), message("m-4", 4, "four")];
+  const current = [createMessage("m-2", 2, "two"), createMessage("m-4", 4, "four")];
+  const replay = [
+    createMessage("m-1", 1, "one"),
+    createMessage("m-3", 3, "three"),
+    createMessage("m-4", 4, "four")
+  ];
 
   const merged = mergeMessagesByOrder(current, replay);
   assert.deepEqual(
@@ -36,6 +40,9 @@ test("ui smoke: timeline merge deduplicates by id and preserves server order", (
 
 test("ui smoke: composer constraints mirror participant-visible errors", () => {
   assert.equal(getComposerError("   "), "Message cannot be blank");
-  assert.equal(getComposerError("x".repeat(201)), "Message must be 200 chars or fewer");
+  assert.equal(
+    getComposerError("x".repeat(MESSAGE_MAX_LENGTH + 1)),
+    `Message must be ${MESSAGE_MAX_LENGTH} chars or fewer`
+  );
   assert.equal(getComposerError("hello"), null);
 });
