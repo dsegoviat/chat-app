@@ -647,3 +647,185 @@ test("managed realtime gateway fans out live timeline across app instances", asy
     await Promise.all([appA.close(), appB.close()]);
   }
 });
+
+test("managed backend contract parity suite verifies migration behavior invariants", async () => {
+  let nowMs = Date.now();
+  const now = () => new Date(nowMs);
+  const timelineStore = createInMemoryTimelineStore();
+  const realtimeGateway = createInMemoryRealtimeGateway();
+  const appA = await buildApp({
+    webOrigin: "http://localhost:3000",
+    timelineStore,
+    realtimeGateway,
+    now
+  });
+  const appB = await buildApp({
+    webOrigin: "http://localhost:3000",
+    timelineStore,
+    realtimeGateway,
+    now
+  });
+
+  await Promise.all([
+    appA.listen({ port: 0, host: "127.0.0.1" }),
+    appB.listen({ port: 0, host: "127.0.0.1" })
+  ]);
+
+  const addressA = appA.server.address();
+  const addressB = appB.server.address();
+  if (!addressA || typeof addressA === "string" || !addressB || typeof addressB === "string") {
+    throw new Error("Unable to determine server addresses");
+  }
+
+  const baseUrlA = `http://127.0.0.1:${addressA.port}`;
+  const baseUrlB = `http://127.0.0.1:${addressB.port}`;
+  try {
+    const invalid = await fetch(`${baseUrlA}/api/join`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ displayName: "1bad" })
+    });
+    assert.equal(invalid.status, 400);
+    assert.equal((await invalid.json()).error, "display_name_invalid");
+
+    const reservedWord = await fetch(`${baseUrlA}/api/join`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ displayName: "system" })
+    });
+    assert.equal(reservedWord.status, 400);
+    assert.equal((await reservedWord.json()).error, "display_name_reserved");
+
+    const joinAlex = await fetch(`${baseUrlA}/api/join`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ displayName: "Alex" })
+    });
+    assert.equal(joinAlex.status, 200);
+    const alexCookie = joinAlex.headers.get("set-cookie");
+    assert.ok(alexCookie);
+
+    const taken = await fetch(`${baseUrlA}/api/join`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ displayName: "aLex" })
+    });
+    assert.equal(taken.status, 409);
+    assert.equal((await taken.json()).error, "display_name_taken");
+
+    const wsModule = await import("ws");
+    const socketAlex = new wsModule.WebSocket(toWsUrl(baseUrlA), {
+      headers: { cookie: alexCookie }
+    });
+    await waitForOpen(socketAlex);
+    await sleep(100);
+    socketAlex.close();
+    await sleep(120);
+
+    const reservedByDisconnect = await fetch(`${baseUrlA}/api/join`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ displayName: "alex" })
+    });
+    assert.equal(reservedByDisconnect.status, 409);
+    assert.equal((await reservedByDisconnect.json()).error, "display_name_reserved");
+
+    const reclaim = await fetch(`${baseUrlA}/api/join`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        cookie: alexCookie
+      },
+      body: JSON.stringify({ displayName: "DifferentHandleIgnoredOnReclaim" })
+    });
+    assert.equal(reclaim.status, 200);
+    const reclaimedParticipant = (await reclaim.json()) as {
+      participant: { displayName: string };
+    };
+    assert.equal(reclaimedParticipant.participant.displayName, "Alex");
+
+    const joinBlair = await fetch(`${baseUrlB}/api/join`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ displayName: "Blair" })
+    });
+    assert.equal(joinBlair.status, 200);
+    const blairCookie = joinBlair.headers.get("set-cookie");
+    assert.ok(blairCookie);
+
+    const joinCasey = await fetch(`${baseUrlA}/api/join`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ displayName: "Casey" })
+    });
+    assert.equal(joinCasey.status, 200);
+    const caseyCookie = joinCasey.headers.get("set-cookie");
+    assert.ok(caseyCookie);
+
+    const observer = new wsModule.WebSocket(toWsUrl(baseUrlA), {
+      headers: { cookie: caseyCookie }
+    });
+    await waitForOpen(observer);
+    const systemEvents: string[] = [];
+    observer.on("message", (raw: RawData) => {
+      const parsed = parseSocketEvent(raw) as {
+        type: string;
+        payload?: { displayName?: string; content?: string };
+      };
+      if (parsed.type === "chat/system" && parsed.payload?.displayName === "Alex") {
+        systemEvents.push(String(parsed.payload.content ?? ""));
+      }
+    });
+
+    const senderA = new wsModule.WebSocket(toWsUrl(baseUrlA), {
+      headers: { cookie: alexCookie }
+    });
+    await waitForOpen(senderA);
+
+    for (let i = 0; i < 22; i += 1) {
+      senderA.send(JSON.stringify({ type: "chat/send", content: `managed-${i}` }));
+    }
+    await sleep(220);
+
+    const bootstrapBlair = await fetch(`${baseUrlB}/api/bootstrap`, {
+      headers: { cookie: blairCookie }
+    });
+    assert.equal(bootstrapBlair.status, 200);
+    const bootstrapPayload = (await bootstrapBlair.json()) as {
+      recentMessages: Array<{ content: string; order: number }>;
+    };
+    assert.equal(bootstrapPayload.recentMessages.length, 20);
+    assert.equal(bootstrapPayload.recentMessages[0]?.content, "managed-2");
+    assert.equal(bootstrapPayload.recentMessages[19]?.content, "managed-21");
+    for (let i = 1; i < bootstrapPayload.recentMessages.length; i += 1) {
+      assert.ok(
+        bootstrapPayload.recentMessages[i - 1]!.order <
+          bootstrapPayload.recentMessages[i]!.order
+      );
+    }
+
+    const leaveAlex = await fetch(`${baseUrlA}/api/leave`, {
+      method: "POST",
+      headers: { cookie: alexCookie }
+    });
+    assert.equal(leaveAlex.status, 204);
+    await sleep(120);
+
+    assert.ok(systemEvents.every((event) => event === "joined" || event === "left"));
+    assert.ok(systemEvents.filter((event) => event === "joined").length <= 1);
+    assert.ok(systemEvents.filter((event) => event === "left").length <= 1);
+
+    senderA.close();
+    observer.close();
+
+    nowMs += 5 * 60 * 1000 + 1;
+    const availableAfterReclaimWindow = await fetch(`${baseUrlA}/api/join`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ displayName: "Alex" })
+    });
+    assert.equal(availableAfterReclaimWindow.status, 200);
+  } finally {
+    await Promise.all([appA.close(), appB.close()]);
+  }
+});
