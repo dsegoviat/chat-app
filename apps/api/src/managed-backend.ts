@@ -110,7 +110,7 @@ function createSupabaseTimelineStore(client: SupabaseClient): ManagedTimelineSto
         throw error;
       }
 
-      const mapped = (data ?? []).map((row) => ({
+      const mapped = (data ?? []).map((row: Record<string, unknown>) => ({
         id: String(row.id),
         participantId: String(row.participant_id),
         displayName: String(row.display_name),
@@ -142,7 +142,7 @@ function createSupabaseRealtimeGateway(client: SupabaseClient): ManagedRealtimeG
     },
     subscribeToMessages(handler: (message: ChatMessage) => void): () => void {
       const channel = client.channel(channelName);
-      channel.on("broadcast", { event: eventName }, ({ payload }) => {
+      channel.on("broadcast", { event: eventName }, ({ payload }: { payload: unknown }) => {
         if (payload && typeof payload === "object") {
           handler(payload as ChatMessage);
         }
