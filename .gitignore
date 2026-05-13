@@ -7,5 +7,4 @@ coverage
 !.env.example
 !apps/api/.env.example
 !apps/web/.env.local.example
-pnpm-lock.yaml
 apps/web/tsconfig.tsbuildinfo
