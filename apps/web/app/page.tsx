@@ -9,6 +9,20 @@ const apiBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:400
 
 type JoinState = "idle" | "joining" | "joined";
 
+function mergeMessagesByOrder(
+  current: ChatMessage[],
+  incoming: ChatMessage | ChatMessage[]
+): ChatMessage[] {
+  const nextMessages = Array.isArray(incoming) ? incoming : [incoming];
+  const byId = new Map<string, ChatMessage>();
+
+  for (const message of [...current, ...nextMessages]) {
+    byId.set(message.id, message);
+  }
+
+  return [...byId.values()].sort((left, right) => left.order - right.order);
+}
+
 export default function HomePage() {
   const [joinState, setJoinState] = useState<JoinState>("idle");
   const [displayName, setDisplayName] = useState("");
@@ -38,7 +52,7 @@ export default function HomePage() {
       switch (serverEvent.type) {
         case "chat/bootstrap": {
           const payload: BootstrapResponse = serverEvent.payload;
-          setMessages(payload.recentMessages);
+          setMessages((current) => mergeMessagesByOrder(current, payload.recentMessages));
           setPresenceCount(payload.presenceCount);
           setParticipantName(payload.participant.displayName);
           break;
@@ -47,7 +61,7 @@ export default function HomePage() {
           setPresenceCount(serverEvent.presenceCount);
           break;
         case "chat/message":
-          setMessages((current) => [...current, serverEvent.payload]);
+          setMessages((current) => mergeMessagesByOrder(current, serverEvent.payload));
           break;
         case "chat/error":
           setError(serverEvent.reason);
@@ -90,7 +104,7 @@ export default function HomePage() {
     const payload = (await bootstrap.json()) as BootstrapResponse;
     setParticipantName(payload.participant.displayName);
     setPresenceCount(payload.presenceCount);
-    setMessages(payload.recentMessages);
+    setMessages(mergeMessagesByOrder([], payload.recentMessages));
     setJoinState("joined");
     setReplaced(false);
     connectSocket();

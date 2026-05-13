@@ -85,6 +85,7 @@ test("message pipeline enforces validation, order, and recent replay cap", async
 
     await connected;
     socket.send(JSON.stringify({ type: "chat/send", content: "   " }));
+    socket.send(JSON.stringify({ type: "chat/send", content: "x".repeat(201) }));
     socket.send(JSON.stringify({ type: "chat/send", content: "hello" }));
 
     for (let i = 0; i < 25; i += 1) {
@@ -93,7 +94,9 @@ test("message pipeline enforces validation, order, and recent replay cap", async
 
     await new Promise((resolve) => setTimeout(resolve, 200));
 
-    assert.ok(errors.length >= 1);
+    const errorReasons = errors.map((event) => String(event.reason ?? ""));
+    assert.ok(errorReasons.includes("message_blank"));
+    assert.ok(errorReasons.includes("message_too_long"));
     assert.ok(messages.length >= 26);
 
     let previousOrder = 0;
@@ -119,6 +122,93 @@ test("message pipeline enforces validation, order, and recent replay cap", async
     assert.equal(replay.recentMessages[19]?.content, "m-24");
 
     socket.close();
+  });
+});
+
+test("all participants observe the same server message order", async () => {
+  await withServer(async (baseUrl) => {
+    const wsModule = await import("ws");
+
+    const joinA = await fetch(`${baseUrl}/api/join`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ displayName: "Alex" })
+    });
+    const joinB = await fetch(`${baseUrl}/api/join`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ displayName: "Blair" })
+    });
+
+    const cookieA = joinA.headers.get("set-cookie");
+    const cookieB = joinB.headers.get("set-cookie");
+    assert.ok(cookieA);
+    assert.ok(cookieB);
+
+    const socketA = new wsModule.WebSocket(`${baseUrl.replace("http", "ws")}/ws`, {
+      headers: { cookie: cookieA }
+    });
+    const socketB = new wsModule.WebSocket(`${baseUrl.replace("http", "ws")}/ws`, {
+      headers: { cookie: cookieB }
+    });
+
+    const seenByA: Array<{ order: number; content: string }> = [];
+    const seenByB: Array<{ order: number; content: string }> = [];
+
+    socketA.on("message", (raw: RawData) => {
+      const parsed = JSON.parse(raw.toString()) as {
+        type: string;
+        payload?: { order: number; content: string };
+      };
+      if (parsed.type === "chat/message" && parsed.payload) {
+        seenByA.push(parsed.payload);
+      }
+    });
+
+    socketB.on("message", (raw: RawData) => {
+      const parsed = JSON.parse(raw.toString()) as {
+        type: string;
+        payload?: { order: number; content: string };
+      };
+      if (parsed.type === "chat/message" && parsed.payload) {
+        seenByB.push(parsed.payload);
+      }
+    });
+
+    await Promise.all([
+      new Promise<void>((resolve, reject) => {
+        socketA.on("open", resolve);
+        socketA.on("error", reject);
+      }),
+      new Promise<void>((resolve, reject) => {
+        socketB.on("open", resolve);
+        socketB.on("error", reject);
+      })
+    ]);
+
+    socketA.send(JSON.stringify({ type: "chat/send", content: "first-from-a" }));
+    socketB.send(JSON.stringify({ type: "chat/send", content: "second-from-b" }));
+    socketA.send(JSON.stringify({ type: "chat/send", content: "third-from-a" }));
+
+    await new Promise((resolve) => setTimeout(resolve, 200));
+
+    assert.equal(seenByA.length, 3);
+    assert.equal(seenByB.length, 3);
+
+    const orderA = seenByA.map((m) => `${m.order}:${m.content}`);
+    const orderB = seenByB.map((m) => `${m.order}:${m.content}`);
+
+    assert.deepEqual(orderA, orderB);
+    for (let i = 1; i < seenByA.length; i += 1) {
+      assert.ok(seenByA[i - 1]!.order < seenByA[i]!.order);
+    }
+
+    for (let i = 1; i < seenByB.length; i += 1) {
+      assert.ok(seenByB[i - 1]!.order < seenByB[i]!.order);
+    }
+
+    socketA.close();
+    socketB.close();
   });
 });
 

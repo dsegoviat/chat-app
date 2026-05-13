@@ -37,9 +37,16 @@ export interface BootstrapResponse {
 
 export type ClientEvent = { type: "chat/send"; content: string };
 
+export type ChatErrorReason =
+  | "missing_session"
+  | "invalid_payload"
+  | "invalid_event_type"
+  | "message_blank"
+  | "message_too_long";
+
 export type ServerEvent =
   | { type: "chat/bootstrap"; payload: BootstrapResponse }
   | { type: "chat/presence"; presenceCount: number }
   | { type: "chat/message"; payload: ChatMessage }
   | { type: "chat/replaced"; reason: string }
-  | { type: "chat/error"; reason: string };
+  | { type: "chat/error"; reason: ChatErrorReason };
