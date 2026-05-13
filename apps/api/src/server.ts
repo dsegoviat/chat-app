@@ -43,6 +43,10 @@ function readCookie(cookieHeader: string | undefined, name: string): string | un
   return undefined;
 }
 
+function sendSocketEvent(socket: WebSocket, event: ServerEvent): void {
+  socket.send(JSON.stringify(event));
+}
+
 export async function buildApp(options: BuildOptions): Promise<FastifyInstance> {
   const app = Fastify({ logger: true });
 
@@ -52,11 +56,11 @@ export async function buildApp(options: BuildOptions): Promise<FastifyInstance> 
   let messageOrder = 0;
 
   const broadcast = (event: ServerEvent): void => {
-    const payload = JSON.stringify(event);
+    const serializedEvent = JSON.stringify(event);
 
     for (const connection of activeConnections.values()) {
       if (connection.socket.readyState === WebSocket.OPEN) {
-        connection.socket.send(payload);
+        connection.socket.send(serializedEvent);
       }
     }
   };
@@ -138,92 +142,88 @@ export async function buildApp(options: BuildOptions): Promise<FastifyInstance> 
       reply.code(426).send({ error: "websocket_required" });
     },
     wsHandler: (socket, request) => {
-    const participant = resolveParticipantFromCookie(
-      readCookie(request.headers.cookie, COOKIE_NAME)
-    );
+      const participant = resolveParticipantFromCookie(
+        readCookie(request.headers.cookie, COOKIE_NAME)
+      );
 
-    if (!participant) {
-      socket.send(JSON.stringify({ type: "chat/error", reason: "missing_session" } satisfies ServerEvent));
-      socket.close(4000, "missing_session");
-      return;
-    }
+      if (!participant) {
+        sendSocketEvent(socket, { type: "chat/error", reason: "missing_session" });
+        socket.close(4000, "missing_session");
+        return;
+      }
 
-    const existing = activeConnections.get(participant.id);
-    if (existing && existing.socket !== socket) {
-      if (existing.socket.readyState === WebSocket.OPEN) {
-        existing.socket.send(
-          JSON.stringify({
+      const existingConnection = activeConnections.get(participant.id);
+      if (existingConnection && existingConnection.socket !== socket) {
+        if (existingConnection.socket.readyState === WebSocket.OPEN) {
+          sendSocketEvent(existingConnection.socket, {
             type: "chat/replaced",
             reason: "A newer tab became active for this identity."
-          } satisfies ServerEvent)
-        );
+          });
+        }
+        existingConnection.socket.close(4001, "replaced");
       }
-      existing.socket.close(4001, "replaced");
-    }
 
-    activeConnections.set(participant.id, { participantId: participant.id, socket });
-    socket.send(
-      JSON.stringify({
+      activeConnections.set(participant.id, { participantId: participant.id, socket });
+      sendSocketEvent(socket, {
         type: "chat/bootstrap",
         payload: {
           participant,
           presenceCount: activeConnections.size,
           recentMessages
         }
-      } satisfies ServerEvent)
-    );
-    updatePresence();
+      });
+      updatePresence();
 
-    socket.on("message", (raw: RawData) => {
-      let event: ClientEvent;
-      try {
-        event = JSON.parse(raw.toString()) as ClientEvent;
-      } catch {
-        socket.send(JSON.stringify({ type: "chat/error", reason: "invalid_payload" } satisfies ServerEvent));
-        return;
-      }
+      socket.on("message", (raw: RawData) => {
+        let event: ClientEvent;
+        try {
+          event = JSON.parse(raw.toString()) as ClientEvent;
+        } catch {
+          sendSocketEvent(socket, { type: "chat/error", reason: "invalid_payload" });
+          return;
+        }
 
-      if (event.type !== "chat/send") {
-        socket.send(JSON.stringify({ type: "chat/error", reason: "invalid_event_type" } satisfies ServerEvent));
-        return;
-      }
+        if (event.type !== "chat/send") {
+          sendSocketEvent(socket, { type: "chat/error", reason: "invalid_event_type" });
+          return;
+        }
 
-      const content = String(event.content ?? "").trim();
-      if (!content) {
-        socket.send(JSON.stringify({ type: "chat/error", reason: "message_blank" } satisfies ServerEvent));
-        return;
-      }
+        const content = String(event.content ?? "").trim();
+        if (!content) {
+          sendSocketEvent(socket, { type: "chat/error", reason: "message_blank" });
+          return;
+        }
 
-      if (content.length > MESSAGE_MAX_LENGTH) {
-        socket.send(JSON.stringify({ type: "chat/error", reason: "message_too_long" } satisfies ServerEvent));
-        return;
-      }
+        if (content.length > MESSAGE_MAX_LENGTH) {
+          sendSocketEvent(socket, { type: "chat/error", reason: "message_too_long" });
+          return;
+        }
 
-      messageOrder += 1;
-      const chatMessage: ChatMessage = {
-        id: randomUUID(),
-        participantId: participant.id,
-        displayName: participant.displayName,
-        content,
-        order: messageOrder,
-        timestamp: new Date().toISOString()
-      };
+        messageOrder += 1;
+        const chatMessage: ChatMessage = {
+          id: randomUUID(),
+          participantId: participant.id,
+          displayName: participant.displayName,
+          content,
+          order: messageOrder,
+          timestamp: new Date().toISOString()
+        };
 
-      recentMessages.push(chatMessage);
-      if (recentMessages.length > RECENT_MESSAGES_LIMIT) {
-        recentMessages.shift();
-      }
+        recentMessages.push(chatMessage);
+        if (recentMessages.length > RECENT_MESSAGES_LIMIT) {
+          recentMessages.shift();
+        }
 
-      broadcast({ type: "chat/message", payload: chatMessage });
-    });
+        broadcast({ type: "chat/message", payload: chatMessage });
+      });
 
-    socket.on("close", () => {
-      const current = activeConnections.get(participant.id);
-      if (current?.socket === socket) {
-        activeConnections.delete(participant.id);
-        updatePresence();
-      }
-    });
+      socket.on("close", () => {
+        const currentConnection = activeConnections.get(participant.id);
+        if (currentConnection?.socket === socket) {
+          activeConnections.delete(participant.id);
+          updatePresence();
+        }
+      });
     }
   });
 

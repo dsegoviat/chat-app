@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import type { BootstrapResponse, ChatMessage, ServerEvent } from "@chat-app/contracts";
 import { MESSAGE_MAX_LENGTH } from "@chat-app/contracts";
@@ -20,7 +20,7 @@ export default function HomePage() {
   const [replaced, setReplaced] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
 
-  const websocketUrl = useMemo(() => apiBaseUrl.replace("http", "ws") + "/ws", []);
+  const websocketUrl = apiBaseUrl.replace("http", "ws") + "/ws";
 
   useEffect(() => {
     return () => {
@@ -29,34 +29,33 @@ export default function HomePage() {
   }, []);
 
   const connectSocket = () => {
-    const ws = new WebSocket(websocketUrl);
-    wsRef.current = ws;
+    const socket = new WebSocket(websocketUrl);
+    wsRef.current = socket;
 
-    ws.onmessage = (event) => {
-      const parsed = JSON.parse(event.data) as ServerEvent;
+    socket.onmessage = (event) => {
+      const serverEvent = JSON.parse(event.data) as ServerEvent;
 
-      if (parsed.type === "chat/bootstrap") {
-        const payload = parsed.payload as BootstrapResponse;
-        setMessages(payload.recentMessages);
-        setPresenceCount(payload.presenceCount);
-        setParticipantName(payload.participant.displayName);
-      }
-
-      if (parsed.type === "chat/presence") {
-        setPresenceCount(parsed.presenceCount);
-      }
-
-      if (parsed.type === "chat/message") {
-        setMessages((current) => [...current, parsed.payload]);
-      }
-
-      if (parsed.type === "chat/error") {
-        setError(parsed.reason);
-      }
-
-      if (parsed.type === "chat/replaced") {
-        setReplaced(true);
-        ws.close();
+      switch (serverEvent.type) {
+        case "chat/bootstrap": {
+          const payload: BootstrapResponse = serverEvent.payload;
+          setMessages(payload.recentMessages);
+          setPresenceCount(payload.presenceCount);
+          setParticipantName(payload.participant.displayName);
+          break;
+        }
+        case "chat/presence":
+          setPresenceCount(serverEvent.presenceCount);
+          break;
+        case "chat/message":
+          setMessages((current) => [...current, serverEvent.payload]);
+          break;
+        case "chat/error":
+          setError(serverEvent.reason);
+          break;
+        case "chat/replaced":
+          setReplaced(true);
+          socket.close();
+          break;
       }
     };
   };
