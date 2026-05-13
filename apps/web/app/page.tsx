@@ -4,28 +4,9 @@ import { useEffect, useRef, useState } from "react";
 
 import type { BootstrapResponse, ChatMessage, ServerEvent } from "@chat-app/contracts";
 import { MESSAGE_MAX_LENGTH } from "@chat-app/contracts";
+import { canSubmitJoin, getComposerError, mergeMessagesByOrder, type JoinState } from "./chat-flow";
 
 const apiBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:4000";
-
-type JoinState = "idle" | "joining" | "joined";
-
-function mergeMessagesByOrder(
-  current: ChatMessage[],
-  incoming: ChatMessage | ChatMessage[]
-): ChatMessage[] {
-  const nextMessages = Array.isArray(incoming) ? incoming : [incoming];
-  const byId = new Map<string, ChatMessage>();
-
-  for (const message of current) {
-    byId.set(message.id, message);
-  }
-
-  for (const message of nextMessages) {
-    byId.set(message.id, message);
-  }
-
-  return [...byId.values()].sort((left, right) => left.order - right.order);
-}
 
 export default function HomePage() {
   const [joinState, setJoinState] = useState<JoinState>("idle");
@@ -115,16 +96,13 @@ export default function HomePage() {
   };
 
   const sendMessage = () => {
-    const trimmed = draft.trim();
-    if (!trimmed) {
-      setError("Message cannot be blank");
-      return;
-    }
-    if (trimmed.length > MESSAGE_MAX_LENGTH) {
-      setError(`Message must be ${MESSAGE_MAX_LENGTH} chars or fewer`);
+    const composerError = getComposerError(draft);
+    if (composerError) {
+      setError(composerError);
       return;
     }
 
+    const trimmed = draft.trim();
     wsRef.current?.send(JSON.stringify({ type: "chat/send", content: trimmed }));
     setDraft("");
     setError(null);
@@ -143,7 +121,7 @@ export default function HomePage() {
         />
         <button
           className="rounded bg-black px-3 py-2 text-white disabled:opacity-40"
-          disabled={joinState === "joining"}
+          disabled={!canSubmitJoin(displayName, joinState)}
           onClick={join}
           type="button"
         >

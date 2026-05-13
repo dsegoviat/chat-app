@@ -7,7 +7,8 @@
     "build": "next build",
     "start": "next start",
     "lint": "tsc -p tsconfig.json",
-    "typecheck": "tsc -p tsconfig.json"
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "tsx --test app/**/*.test.ts"
   },
   "dependencies": {
     "@chat-app/contracts": "workspace:*",
@@ -26,6 +27,7 @@
     "autoprefixer": "^10.4.20",
     "postcss": "^8.4.47",
     "tailwindcss": "^3.4.14",
+    "tsx": "^4.19.1",
     "typescript": "^5.6.3"
   }
 }
