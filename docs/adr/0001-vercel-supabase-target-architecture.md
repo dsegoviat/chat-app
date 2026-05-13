@@ -1,0 +1,3 @@
+# Vercel UI with Supabase for durable state and realtime
+
+We accept a Vercel-first deployment model where the UI application remains on Vercel and Supabase becomes the long-term managed backend platform for durable chat data and realtime event delivery. We make this decision because the current Fastify WebSocket runtime is not a durable/low-ops fit for Vercel serverless execution, while Supabase on free/hobby tiers provides minimal operational setup with acceptable MVP constraints. Fastify remains a temporary migration runtime only until Supabase reaches behavioral parity for join, timeline persistence, presence semantics, and explicit system events.
