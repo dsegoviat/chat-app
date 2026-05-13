@@ -256,3 +256,105 @@ test("new websocket replaces old active connection", async () => {
     first.close();
   });
 });
+
+test("late join receives recent replay and presence reflects connection lifecycle", async () => {
+  await withServer(async (baseUrl) => {
+    const wsModule = await import("ws");
+
+    const joinAlex = await fetch(`${baseUrl}/api/join`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ displayName: "Alex" })
+    });
+    const cookieAlex = joinAlex.headers.get("set-cookie");
+    assert.ok(cookieAlex);
+
+    const socketAlex = new wsModule.WebSocket(toWsUrl(baseUrl), {
+      headers: { cookie: cookieAlex }
+    });
+    const alexPresence: number[] = [];
+    const alexMessages: Array<{ content: string }> = [];
+    socketAlex.on("message", (raw: RawData) => {
+      const event = parseSocketEvent(raw) as {
+        type: string;
+        presenceCount?: number;
+        payload?: { content?: string };
+      };
+      if (event.type === "chat/presence" && typeof event.presenceCount === "number") {
+        alexPresence.push(event.presenceCount);
+      }
+      if (event.type === "chat/message" && event.payload?.content) {
+        alexMessages.push({ content: event.payload.content });
+      }
+    });
+
+    await waitForOpen(socketAlex);
+    socketAlex.send(JSON.stringify({ type: "chat/send", content: "a-1" }));
+    socketAlex.send(JSON.stringify({ type: "chat/send", content: "a-2" }));
+    socketAlex.send(JSON.stringify({ type: "chat/send", content: "a-3" }));
+    await sleep(100);
+
+    const joinBlair = await fetch(`${baseUrl}/api/join`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ displayName: "Blair" })
+    });
+    const cookieBlair = joinBlair.headers.get("set-cookie");
+    assert.ok(cookieBlair);
+
+    const blairBootstrap = await fetch(`${baseUrl}/api/bootstrap`, {
+      headers: { cookie: cookieBlair }
+    });
+    assert.equal(blairBootstrap.status, 200);
+    const blairPayload = (await blairBootstrap.json()) as {
+      recentMessages: Array<{ content: string }>;
+      presenceCount: number;
+    };
+    assert.deepEqual(blairPayload.recentMessages.map((m) => m.content), ["a-1", "a-2", "a-3"]);
+    assert.equal(blairPayload.presenceCount, 1);
+
+    const socketBlair = new wsModule.WebSocket(toWsUrl(baseUrl), {
+      headers: { cookie: cookieBlair }
+    });
+    const blairPresence: number[] = [];
+    const blairMessages: Array<{ content: string }> = [];
+    socketBlair.on("message", (raw: RawData) => {
+      const event = parseSocketEvent(raw) as {
+        type: string;
+        presenceCount?: number;
+        payload?: { content?: string };
+      };
+      if (event.type === "chat/presence" && typeof event.presenceCount === "number") {
+        blairPresence.push(event.presenceCount);
+      }
+      if (event.type === "chat/message" && event.payload?.content) {
+        blairMessages.push({ content: event.payload.content });
+      }
+    });
+
+    await waitForOpen(socketBlair);
+    await sleep(100);
+
+    socketAlex.send(JSON.stringify({ type: "chat/send", content: "a-4" }));
+    await sleep(100);
+
+    assert.ok(alexPresence.includes(2));
+    assert.ok(blairPresence.includes(2));
+    assert.equal(blairMessages.at(-1)?.content, "a-4");
+
+    socketBlair.close();
+    await sleep(120);
+    assert.equal(alexPresence.at(-1), 1);
+
+    const socketAlexReplacement = new wsModule.WebSocket(toWsUrl(baseUrl), {
+      headers: { cookie: cookieAlex }
+    });
+    await waitForOpen(socketAlexReplacement);
+    await sleep(120);
+
+    assert.equal(alexPresence.at(-1), 1);
+
+    socketAlexReplacement.close();
+    socketAlex.close();
+  });
+});
