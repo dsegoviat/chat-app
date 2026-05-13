@@ -50,6 +50,30 @@ export default function HomePage() {
     const prefs = loadTimelinePreferences();
     setShowTimestamps(prefs.showTimestamps);
     setShowSystemEvents(prefs.showSystemEvents);
+
+    void (async () => {
+      try {
+        const bootstrap = await fetch(`${apiBaseUrl}/api/bootstrap`, {
+          credentials: "include"
+        });
+        if (!bootstrap.ok) {
+          return;
+        }
+
+        const payload = (await bootstrap.json()) as BootstrapResponse;
+        setParticipantName(payload.participant.displayName);
+        setParticipantsSeen(sortHandles([payload.participant.displayName]));
+        setPresenceCount(payload.presenceCount);
+        setMessages(mergeMessagesByOrder([], payload.recentMessages));
+        setSystemMessages([]);
+        setJoinState("joined");
+        setReplaced(false);
+        connectSocket();
+      } catch {
+        // Ignore; user can still join manually.
+      }
+    })();
+
     return () => {
       wsRef.current?.close();
     };
