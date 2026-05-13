@@ -1,5 +1,3 @@
-import "dotenv/config";
-
 import cookie from "@fastify/cookie";
 import cors from "@fastify/cors";
 import websocket from "@fastify/websocket";
@@ -8,15 +6,13 @@ import type {
   BootstrapResponse,
   ChatMessage,
   ClientEvent,
-  JoinErrorResponse,
   JoinRequest,
   JoinResponse,
   Participant,
-  ServerEvent,
-  SystemEventMessage
+  ServerEvent
 } from "@chat-app/contracts";
 import { MESSAGE_MAX_LENGTH, RECENT_MESSAGES_LIMIT } from "@chat-app/contracts";
-import Fastify, { type FastifyInstance, type FastifyReply } from "fastify";
+import Fastify, { type FastifyInstance } from "fastify";
 import { randomUUID } from "node:crypto";
 import { type RawData, WebSocket } from "ws";
 import {
@@ -26,40 +22,26 @@ import {
   type ManagedTimelineStore
 } from "./managed-backend";
 
-type BuildOptions = {
-  webOrigin: string;
-  timelineStore?: ManagedTimelineStore;
-  realtimeGateway?: ManagedRealtimeGateway;
-};
-
 type ActiveConnection = {
   participantId: string;
   socket: WebSocket;
 };
 
+type BuildOptions = {
+  webOrigin: string;
+  timelineStore?: ManagedTimelineStore;
+  realtimeGateway?: ManagedRealtimeGateway;
+  now?: () => Date;
+};
+
 const COOKIE_NAME = "chat_session";
-const RESERVED_HANDLES = new Set(["system"]);
+const HANDLE_RECLAIM_WINDOW_MS = 5 * 60 * 1000;
 
-function normalizeHandle(displayName: string): string {
-  return displayName.trim().toLowerCase();
-}
-
-function isValidHandle(displayName: string): boolean {
-  const handle = displayName.trim();
-  if (handle.length < 3 || handle.length > 20) {
-    return false;
-  }
-  if (!/^[A-Za-z]/.test(handle)) {
-    return false;
-  }
-  if (/[^A-Za-z0-9_-]/.test(handle)) {
-    return false;
-  }
-  if (handle.includes("--") || handle.includes("__")) {
-    return false;
-  }
-  return true;
-}
+type HandleReservation = {
+  participantId: string;
+  normalizedHandle: string;
+  expiresAtMs: number;
+};
 
 function readCookie(cookieHeader: string | undefined, name: string): string | undefined {
   if (!cookieHeader) {
@@ -85,28 +67,6 @@ function sendInvalidPayload(socket: WebSocket): void {
   sendSocketEvent(socket, { type: "chat/error", reason: "invalid_payload" });
 }
 
-function createSystemEvent(
-  participant: Participant,
-  content: SystemEventMessage["content"]
-): SystemEventMessage {
-  return {
-    id: randomUUID(),
-    participantId: participant.id,
-    displayName: participant.displayName,
-    content,
-    timestamp: new Date().toISOString()
-  };
-}
-
-function sendJoinError(
-  reply: FastifyReply,
-  statusCode: number,
-  error: JoinErrorResponse["error"]
-): unknown {
-  const response: JoinErrorResponse = { error };
-  return reply.status(statusCode).send(response);
-}
-
 export async function buildApp(options: BuildOptions): Promise<FastifyInstance> {
   const app = Fastify({ logger: true });
   const managedStoreFromEnv = createManagedTimelineStoreFromEnv();
@@ -121,8 +81,11 @@ export async function buildApp(options: BuildOptions): Promise<FastifyInstance> 
   }
 
   const participants = new Map<string, Participant>();
-  const participantIdsByHandle = new Map<string, string>();
+  const activeHandles = new Map<string, string>();
+  const reservedHandles = new Map<string, HandleReservation>();
+  const suppressedReservationOnClose = new Set<string>();
   const activeConnections = new Map<string, ActiveConnection>();
+  const now = options.now ?? (() => new Date());
   let messageOrder = 0;
   const latestPersisted = await timelineStore.listRecentMessages(1);
   messageOrder = latestPersisted.at(0)?.order ?? 0;
@@ -132,6 +95,7 @@ export async function buildApp(options: BuildOptions): Promise<FastifyInstance> 
 
   const broadcast = (event: ServerEvent): void => {
     const serializedEvent = JSON.stringify(event);
+
     for (const connection of activeConnections.values()) {
       if (connection.socket.readyState === WebSocket.OPEN) {
         connection.socket.send(serializedEvent);
@@ -143,10 +107,49 @@ export async function buildApp(options: BuildOptions): Promise<FastifyInstance> 
     broadcast({ type: "chat/presence", presenceCount: activeConnections.size });
   };
 
+  const normalizeHandle = (value: string): string => value.toLowerCase();
+  const isHandleValid = (value: string): boolean => {
+    if (value.length < 3 || value.length > 20) {
+      return false;
+    }
+    if (!/^[A-Za-z]/.test(value)) {
+      return false;
+    }
+    if (!/^[A-Za-z0-9_-]+$/.test(value)) {
+      return false;
+    }
+    if (value.includes("--") || value.includes("__")) {
+      return false;
+    }
+
+    return true;
+  };
+  const clearExistingHandleState = (participantId: string): void => {
+    for (const [normalizedHandle, ownerParticipantId] of activeHandles.entries()) {
+      if (ownerParticipantId === participantId) {
+        activeHandles.delete(normalizedHandle);
+      }
+    }
+    for (const [normalizedHandle, reservation] of reservedHandles.entries()) {
+      if (reservation.participantId === participantId) {
+        reservedHandles.delete(normalizedHandle);
+      }
+    }
+  };
+  const pruneExpiredReservations = (): void => {
+    const nowMs = now().getTime();
+    for (const [normalizedHandle, reservation] of reservedHandles.entries()) {
+      if (reservation.expiresAtMs <= nowMs) {
+        reservedHandles.delete(normalizedHandle);
+      }
+    }
+  };
+
   const resolveParticipantFromCookie = (cookieValue: string | undefined): Participant | null => {
     if (!cookieValue) {
       return null;
     }
+
     return participants.get(cookieValue) ?? null;
   };
 
@@ -167,23 +170,24 @@ export async function buildApp(options: BuildOptions): Promise<FastifyInstance> 
   });
 
   app.post<{ Body: JoinRequest }>("/api/join", async (request, reply) => {
+    pruneExpiredReservations();
     const displayName = String(request.body?.displayName ?? "").trim();
-    const normalizedHandle = normalizeHandle(displayName);
     const previousParticipant = resolveParticipantFromCookie(request.cookies[COOKIE_NAME]);
-
-    if (!previousParticipant && !displayName) {
-      return sendJoinError(reply, 400, "display_name_required");
-    }
+    const normalizedRequestedHandle = normalizeHandle(displayName);
 
     if (!previousParticipant) {
-      if (!isValidHandle(displayName)) {
-        return sendJoinError(reply, 400, "display_name_invalid");
+      if (!isHandleValid(displayName)) {
+        return reply.status(400).send({ error: "handle_invalid" });
       }
-      if (RESERVED_HANDLES.has(normalizedHandle)) {
-        return sendJoinError(reply, 400, "display_name_reserved");
+
+      const activeOwner = activeHandles.get(normalizedRequestedHandle);
+      if (activeOwner) {
+        return reply.status(409).send({ error: "handle_taken" });
       }
-      if (participantIdsByHandle.has(normalizedHandle)) {
-        return sendJoinError(reply, 409, "display_name_taken");
+
+      const reservation = reservedHandles.get(normalizedRequestedHandle);
+      if (reservation) {
+        return reply.status(409).send({ error: "handle_reserved" });
       }
     }
 
@@ -191,9 +195,10 @@ export async function buildApp(options: BuildOptions): Promise<FastifyInstance> 
       id: randomUUID(),
       displayName
     };
+    clearExistingHandleState(participant.id);
+    activeHandles.set(normalizeHandle(participant.displayName), participant.id);
 
     participants.set(participant.id, participant);
-    participantIdsByHandle.set(normalizeHandle(participant.displayName), participant.id);
 
     reply.setCookie(COOKIE_NAME, participant.id, {
       path: "/",
@@ -203,6 +208,24 @@ export async function buildApp(options: BuildOptions): Promise<FastifyInstance> 
 
     const response: JoinResponse = { participant };
     return response;
+  });
+
+  app.post("/api/leave", async (request, reply) => {
+    const participant = resolveParticipantFromCookie(request.cookies[COOKIE_NAME]);
+    if (participant) {
+      suppressedReservationOnClose.add(participant.id);
+      clearExistingHandleState(participant.id);
+      participants.delete(participant.id);
+      const connection = activeConnections.get(participant.id);
+      if (connection) {
+        connection.socket.close(4002, "left");
+        activeConnections.delete(participant.id);
+        updatePresence();
+      }
+    }
+
+    reply.clearCookie(COOKIE_NAME, { path: "/" });
+    return reply.status(204).send();
   });
 
   app.get("/api/bootstrap", async (request, reply) => {
@@ -239,7 +262,6 @@ export async function buildApp(options: BuildOptions): Promise<FastifyInstance> 
       }
 
       const existingConnection = activeConnections.get(participant.id);
-      const isReplacement = Boolean(existingConnection && existingConnection.socket !== socket);
       if (existingConnection && existingConnection.socket !== socket) {
         if (existingConnection.socket.readyState === WebSocket.OPEN) {
           sendSocketEvent(existingConnection.socket, {
@@ -251,10 +273,6 @@ export async function buildApp(options: BuildOptions): Promise<FastifyInstance> 
       }
 
       activeConnections.set(participant.id, { participantId: participant.id, socket });
-      if (!isReplacement) {
-        broadcast({ type: "chat/system", payload: createSystemEvent(participant, "joined") });
-      }
-
       void (async () => {
         try {
           const recentMessages = await timelineStore.listRecentMessages(RECENT_MESSAGES_LIMIT);
@@ -284,10 +302,6 @@ export async function buildApp(options: BuildOptions): Promise<FastifyInstance> 
         }
 
         if (event.type !== "chat/send") {
-          if (event.type === "chat/leave") {
-            socket.close(4002, "left");
-            return;
-          }
           sendSocketEvent(socket, { type: "chat/error", reason: "invalid_event_type" });
           return;
         }
@@ -328,7 +342,17 @@ export async function buildApp(options: BuildOptions): Promise<FastifyInstance> 
         const currentConnection = activeConnections.get(participant.id);
         if (currentConnection?.socket === socket) {
           activeConnections.delete(participant.id);
-          broadcast({ type: "chat/system", payload: createSystemEvent(participant, "left") });
+          clearExistingHandleState(participant.id);
+          if (suppressedReservationOnClose.has(participant.id)) {
+            suppressedReservationOnClose.delete(participant.id);
+          } else {
+            const normalizedHandle = normalizeHandle(participant.displayName);
+            reservedHandles.set(normalizedHandle, {
+              participantId: participant.id,
+              normalizedHandle,
+              expiresAtMs: now().getTime() + HANDLE_RECLAIM_WINDOW_MS
+            });
+          }
           updatePresence();
         }
       });
