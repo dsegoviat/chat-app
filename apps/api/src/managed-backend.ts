@@ -21,6 +21,12 @@ export interface ManagedPresenceProjection {
 }
 
 type ManagedProvider = "memory" | "supabase";
+type PresenceAction = "active" | "inactive";
+type PresenceProjectionMessage = {
+  sourceServerId?: string;
+  action?: PresenceAction;
+  participantId?: string;
+};
 
 type InMemoryTimelineStore = ManagedTimelineStore & {
   listAllMessagesForDebug(): ChatMessage[];
@@ -79,6 +85,20 @@ function notifyPresenceSubscribers(
   for (const subscriber of subscribers) {
     subscriber(snapshot);
   }
+}
+
+function applyPresenceTransition(
+  participantIds: Set<string>,
+  action: PresenceAction,
+  participantId: string
+): boolean {
+  if (action === "active") {
+    const previousSize = participantIds.size;
+    participantIds.add(participantId);
+    return participantIds.size !== previousSize;
+  }
+
+  return participantIds.delete(participantId);
 }
 
 export function createInMemoryPresenceProjection(): ManagedPresenceProjection {
@@ -219,35 +239,37 @@ function createSupabasePresenceProjection(client: SupabaseClient): ManagedPresen
   const notify = (): void => {
     notifyPresenceSubscribers(subscribers, projectedActive);
   };
+  const publishPresenceAction = async (
+    action: PresenceAction,
+    participantId: string
+  ): Promise<void> => {
+    const status = await channel.send({
+      type: "broadcast",
+      event: eventName,
+      payload: {
+        sourceServerId: serverId,
+        action,
+        participantId
+      }
+    });
+    if (status !== "ok") {
+      throw new Error(`supabase_presence_publish_failed:${status}`);
+    }
+  };
 
   channel.on("broadcast", { event: eventName }, ({ payload }: { payload: unknown }) => {
     if (!payload || typeof payload !== "object") {
       return;
     }
 
-    const message = payload as {
-      sourceServerId?: string;
-      action?: "active" | "inactive";
-      participantId?: string;
-    };
-    if (message.sourceServerId === serverId || !message.participantId) {
+    const message = payload as PresenceProjectionMessage;
+    if (!message.participantId || !message.action || message.sourceServerId === serverId) {
       return;
     }
 
-    if (message.action === "active") {
-      const before = projectedActive.size;
-      projectedActive.add(message.participantId);
-      if (projectedActive.size !== before) {
-        notify();
-      }
-      return;
-    }
-
-    if (message.action === "inactive") {
-      const removed = projectedActive.delete(message.participantId);
-      if (removed) {
-        notify();
-      }
+    const changed = applyPresenceTransition(projectedActive, message.action, message.participantId);
+    if (changed) {
+      notify();
     }
   });
   void channel.subscribe();
@@ -262,18 +284,7 @@ function createSupabasePresenceProjection(client: SupabaseClient): ManagedPresen
       }
 
       notify();
-      const status = await channel.send({
-        type: "broadcast",
-        event: eventName,
-        payload: {
-          sourceServerId: serverId,
-          action: "active",
-          participantId
-        }
-      });
-      if (status !== "ok") {
-        throw new Error(`supabase_presence_publish_failed:${status}`);
-      }
+      await publishPresenceAction("active", participantId);
     },
     async markInactive(participantId: string): Promise<void> {
       const removed = localActive.delete(participantId);
@@ -283,18 +294,7 @@ function createSupabasePresenceProjection(client: SupabaseClient): ManagedPresen
       }
 
       notify();
-      const status = await channel.send({
-        type: "broadcast",
-        event: eventName,
-        payload: {
-          sourceServerId: serverId,
-          action: "inactive",
-          participantId
-        }
-      });
-      if (status !== "ok") {
-        throw new Error(`supabase_presence_publish_failed:${status}`);
-      }
+      await publishPresenceAction("inactive", participantId);
     },
     async listActiveParticipantIds(): Promise<string[]> {
       return [...projectedActive];
