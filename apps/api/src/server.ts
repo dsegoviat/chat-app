@@ -57,6 +57,36 @@ const COOKIE_NAME = "chat_session";
 const RESERVED_HANDLES = new Set(["system"]);
 const HANDLE_RECLAIM_WINDOW_MS = 5 * 60 * 1000;
 
+function getSessionCookieOptions(webOrigin: string): {
+  path: string;
+  sameSite: "lax" | "none";
+  httpOnly: true;
+  secure?: boolean;
+} {
+  const isHttpsOrigin = webOrigin.startsWith("https://");
+  if (isHttpsOrigin) {
+    return {
+      path: "/",
+      sameSite: "none",
+      httpOnly: true,
+      secure: true
+    };
+  }
+
+  return {
+    path: "/",
+    sameSite: "lax",
+    httpOnly: true
+  };
+}
+
+function parseAllowedOrigins(webOrigin: string): string[] {
+  return webOrigin
+    .split(",")
+    .map((value) => value.trim())
+    .filter((value) => value.length > 0);
+}
+
 type HandleReservation = {
   participantId: string;
   expiresAtMs: number;
@@ -101,6 +131,9 @@ function createSystemEvent(
 
 export async function buildApp(options: BuildOptions): Promise<FastifyInstance> {
   const app = Fastify({ logger: true });
+  const allowedOrigins = parseAllowedOrigins(options.webOrigin);
+  const primaryOrigin = allowedOrigins[0] ?? options.webOrigin;
+  const sessionCookieOptions = getSessionCookieOptions(primaryOrigin);
   const managedStoreFromEnv = createManagedTimelineStoreFromEnv();
   const managedRealtimeFromEnv = createManagedRealtimeGatewayFromEnv();
   const managedPresenceFromEnv = createManagedPresenceProjectionFromEnv();
@@ -216,7 +249,19 @@ export async function buildApp(options: BuildOptions): Promise<FastifyInstance> 
   };
 
   await app.register(cors, {
-    origin: options.webOrigin,
+    origin: (origin, callback) => {
+      if (!origin) {
+        callback(null, true);
+        return;
+      }
+
+      if (allowedOrigins.includes(origin)) {
+        callback(null, true);
+        return;
+      }
+
+      callback(new Error(`origin_not_allowed:${origin}`), false);
+    },
     credentials: true
   });
   await app.register(cookie);
@@ -269,11 +314,7 @@ export async function buildApp(options: BuildOptions): Promise<FastifyInstance> 
 
     participants.set(participant.id, participant);
 
-    reply.setCookie(COOKIE_NAME, participant.id, {
-      path: "/",
-      sameSite: "lax",
-      httpOnly: true
-    });
+    reply.setCookie(COOKIE_NAME, participant.id, sessionCookieOptions);
 
     const response: JoinResponse = { participant };
     return response;
