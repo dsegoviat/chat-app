@@ -13,7 +13,7 @@ import type {
   ServerEvent
 } from "@chat-app/contracts";
 import { MESSAGE_MAX_LENGTH, RECENT_MESSAGES_LIMIT } from "@chat-app/contracts";
-import Fastify, { type FastifyInstance } from "fastify";
+import Fastify, { type FastifyInstance, type FastifyReply } from "fastify";
 import { randomUUID } from "node:crypto";
 import { type RawData, WebSocket } from "ws";
 import {
@@ -22,11 +22,6 @@ import {
   type ManagedRealtimeGateway,
   type ManagedTimelineStore
 } from "./managed-backend";
-
-type ActiveConnection = {
-  participantId: string;
-  socket: WebSocket;
-};
 
 type BuildOptions = {
   webOrigin: string;
@@ -77,6 +72,15 @@ function sendInvalidPayload(socket: WebSocket): void {
   sendSocketEvent(socket, { type: "chat/error", reason: "invalid_payload" });
 }
 
+function sendJoinError(
+  reply: FastifyReply,
+  statusCode: number,
+  error: JoinErrorResponse["error"]
+): unknown {
+  const response: JoinErrorResponse = { error };
+  return reply.status(statusCode).send(response);
+}
+
 export async function buildApp(options: BuildOptions): Promise<FastifyInstance> {
   const app = Fastify({ logger: true });
   const managedStoreFromEnv = createManagedTimelineStoreFromEnv();
@@ -92,7 +96,7 @@ export async function buildApp(options: BuildOptions): Promise<FastifyInstance> 
 
   const participants = new Map<string, Participant>();
   const participantHandles = new Map<string, string>();
-  const activeConnections = new Map<string, ActiveConnection>();
+  const activeConnections = new Map<string, WebSocket>();
   let messageOrder = 0;
   const latestPersisted = await timelineStore.listRecentMessages(1);
   messageOrder = latestPersisted.at(0)?.order ?? 0;
@@ -104,8 +108,8 @@ export async function buildApp(options: BuildOptions): Promise<FastifyInstance> 
     const serializedEvent = JSON.stringify(event);
 
     for (const connection of activeConnections.values()) {
-      if (connection.socket.readyState === WebSocket.OPEN) {
-        connection.socket.send(serializedEvent);
+      if (connection.readyState === WebSocket.OPEN) {
+        connection.send(serializedEvent);
       }
     }
   };
@@ -141,21 +145,19 @@ export async function buildApp(options: BuildOptions): Promise<FastifyInstance> 
   app.post<{ Body: JoinRequest }>("/api/join", async (request, reply) => {
     const displayName = String(request.body?.displayName ?? "").trim();
     const previousParticipant = resolveParticipantFromCookie(request.cookies[COOKIE_NAME]);
-    if (!previousParticipant && !displayName) {
-      const response: JoinErrorResponse = { error: "display_name_required" };
-      return reply.status(400).send(response);
+    const isFirstJoin = !previousParticipant;
+    if (isFirstJoin && !displayName) {
+      return sendJoinError(reply, 400, "display_name_required");
     }
 
-    if (!previousParticipant && !isValidHandle(displayName)) {
-      const response: JoinErrorResponse = { error: "handle_invalid" };
-      return reply.status(400).send(response);
+    if (isFirstJoin && !isValidHandle(displayName)) {
+      return sendJoinError(reply, 400, "handle_invalid");
     }
 
-    if (!previousParticipant) {
+    if (isFirstJoin) {
       const normalizedDisplayName = normalizeHandle(displayName);
       if (participantHandles.has(normalizedDisplayName)) {
-        const response: JoinErrorResponse = { error: "handle_taken" };
-        return reply.status(409).send(response);
+        return sendJoinError(reply, 409, "handle_taken");
       }
     }
 
@@ -211,17 +213,17 @@ export async function buildApp(options: BuildOptions): Promise<FastifyInstance> 
       }
 
       const existingConnection = activeConnections.get(participant.id);
-      if (existingConnection && existingConnection.socket !== socket) {
-        if (existingConnection.socket.readyState === WebSocket.OPEN) {
-          sendSocketEvent(existingConnection.socket, {
+      if (existingConnection && existingConnection !== socket) {
+        if (existingConnection.readyState === WebSocket.OPEN) {
+          sendSocketEvent(existingConnection, {
             type: "chat/replaced",
             reason: "A newer tab became active for this identity."
           });
         }
-        existingConnection.socket.close(4001, "replaced");
+        existingConnection.close(4001, "replaced");
       }
 
-      activeConnections.set(participant.id, { participantId: participant.id, socket });
+      activeConnections.set(participant.id, socket);
       void (async () => {
         try {
           const recentMessages = await timelineStore.listRecentMessages(RECENT_MESSAGES_LIMIT);
@@ -289,7 +291,7 @@ export async function buildApp(options: BuildOptions): Promise<FastifyInstance> 
 
       socket.on("close", () => {
         const currentConnection = activeConnections.get(participant.id);
-        if (currentConnection?.socket === socket) {
+        if (currentConnection === socket) {
           activeConnections.delete(participant.id);
           updatePresence();
         }
