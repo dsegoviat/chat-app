@@ -29,6 +29,12 @@ export interface JoinResponse {
   participant: Participant;
 }
 
+export type JoinErrorCode = "display_name_required" | "handle_invalid" | "handle_taken";
+
+export interface JoinErrorResponse {
+  error: JoinErrorCode;
+}
+
 export interface BootstrapResponse {
   participant: Participant;
   presenceCount: number;

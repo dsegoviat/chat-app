@@ -156,6 +156,41 @@ test("join allows blank reconnect payload when session identity already exists",
   assert.equal(reconnectParticipant.displayName, "Alex");
 });
 
+test("join returns explicit validation error codes for invalid and taken handles", async () => {
+  const app = await buildApp({ webOrigin: "http://localhost:3000" });
+
+  const missingDisplayName = await app.inject({
+    method: "POST",
+    url: "/api/join",
+    payload: { displayName: "   " }
+  });
+  assert.equal(missingDisplayName.statusCode, 400);
+  assert.equal(missingDisplayName.json().error, "display_name_required");
+
+  const invalidDisplayName = await app.inject({
+    method: "POST",
+    url: "/api/join",
+    payload: { displayName: "ab" }
+  });
+  assert.equal(invalidDisplayName.statusCode, 400);
+  assert.equal(invalidDisplayName.json().error, "handle_invalid");
+
+  const firstJoin = await app.inject({
+    method: "POST",
+    url: "/api/join",
+    payload: { displayName: "Alex-01" }
+  });
+  assert.equal(firstJoin.statusCode, 200);
+
+  const takenDisplayName = await app.inject({
+    method: "POST",
+    url: "/api/join",
+    payload: { displayName: "aLeX-01" }
+  });
+  assert.equal(takenDisplayName.statusCode, 409);
+  assert.equal(takenDisplayName.json().error, "handle_taken");
+});
+
 test("message pipeline enforces validation, order, and recent replay cap", async () => {
   await withServer(async (baseUrl) => {
     const join = await fetch(`${baseUrl}/api/join`, {

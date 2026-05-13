@@ -6,6 +6,7 @@ import type {
   BootstrapResponse,
   ChatMessage,
   ClientEvent,
+  JoinErrorResponse,
   JoinRequest,
   JoinResponse,
   Participant,
@@ -34,6 +35,23 @@ type BuildOptions = {
 };
 
 const COOKIE_NAME = "chat_session";
+const HANDLE_PATTERN = /^[A-Za-z][A-Za-z0-9_-]{2,19}$/;
+
+function normalizeHandle(displayName: string): string {
+  return displayName.toLowerCase();
+}
+
+function isValidHandle(displayName: string): boolean {
+  if (!HANDLE_PATTERN.test(displayName)) {
+    return false;
+  }
+
+  if (displayName.includes("--") || displayName.includes("__")) {
+    return false;
+  }
+
+  return true;
+}
 
 function readCookie(cookieHeader: string | undefined, name: string): string | undefined {
   if (!cookieHeader) {
@@ -73,6 +91,7 @@ export async function buildApp(options: BuildOptions): Promise<FastifyInstance> 
   }
 
   const participants = new Map<string, Participant>();
+  const participantHandles = new Map<string, string>();
   const activeConnections = new Map<string, ActiveConnection>();
   let messageOrder = 0;
   const latestPersisted = await timelineStore.listRecentMessages(1);
@@ -123,7 +142,21 @@ export async function buildApp(options: BuildOptions): Promise<FastifyInstance> 
     const displayName = String(request.body?.displayName ?? "").trim();
     const previousParticipant = resolveParticipantFromCookie(request.cookies[COOKIE_NAME]);
     if (!previousParticipant && !displayName) {
-      return reply.status(400).send({ error: "display_name_required" });
+      const response: JoinErrorResponse = { error: "display_name_required" };
+      return reply.status(400).send(response);
+    }
+
+    if (!previousParticipant && !isValidHandle(displayName)) {
+      const response: JoinErrorResponse = { error: "handle_invalid" };
+      return reply.status(400).send(response);
+    }
+
+    if (!previousParticipant) {
+      const normalizedDisplayName = normalizeHandle(displayName);
+      if (participantHandles.has(normalizedDisplayName)) {
+        const response: JoinErrorResponse = { error: "handle_taken" };
+        return reply.status(409).send(response);
+      }
     }
 
     const participant: Participant = previousParticipant ?? {
@@ -132,6 +165,7 @@ export async function buildApp(options: BuildOptions): Promise<FastifyInstance> 
     };
 
     participants.set(participant.id, participant);
+    participantHandles.set(normalizeHandle(participant.displayName), participant.id);
 
     reply.setCookie(COOKIE_NAME, participant.id, {
       path: "/",
