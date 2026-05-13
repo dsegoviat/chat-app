@@ -90,6 +90,34 @@ test("join sets session cookie and bootstrap returns participant", async () => {
   assert.equal(body.presenceCount, 0);
 });
 
+test("join preserves session identity handle continuity across reconnect join", async () => {
+  const app = await buildApp({ webOrigin: "http://localhost:3000" });
+
+  const firstJoin = await app.inject({
+    method: "POST",
+    url: "/api/join",
+    payload: { displayName: "Alex" }
+  });
+
+  assert.equal(firstJoin.statusCode, 200);
+  const sessionCookie = firstJoin.cookies.find((cookie) => cookie.name === "chat_session");
+  assert.ok(sessionCookie);
+
+  const secondJoin = await app.inject({
+    method: "POST",
+    url: "/api/join",
+    payload: { displayName: "Blair" },
+    cookies: { chat_session: sessionCookie.value }
+  });
+
+  assert.equal(secondJoin.statusCode, 200);
+  const firstParticipant = firstJoin.json().participant as { id: string; displayName: string };
+  const secondParticipant = secondJoin.json().participant as { id: string; displayName: string };
+
+  assert.equal(secondParticipant.id, firstParticipant.id);
+  assert.equal(secondParticipant.displayName, "Alex");
+});
+
 test("message pipeline enforces validation, order, and recent replay cap", async () => {
   await withServer(async (baseUrl) => {
     const join = await fetch(`${baseUrl}/api/join`, {

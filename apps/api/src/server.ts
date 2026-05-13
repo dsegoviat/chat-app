@@ -107,7 +107,6 @@ export async function buildApp(options: BuildOptions): Promise<FastifyInstance> 
       displayName
     };
 
-    participant.displayName = displayName;
     participants.set(participant.id, participant);
 
     reply.setCookie(COOKIE_NAME, participant.id, {
