@@ -3,7 +3,10 @@ import assert from "node:assert/strict";
 
 import { type RawData, type WebSocket } from "ws";
 
-import { createInMemoryTimelineStore } from "./managed-backend";
+import {
+  createInMemoryRealtimeGateway,
+  createInMemoryTimelineStore
+} from "./managed-backend";
 import { buildApp } from "./server";
 
 async function withServer(
@@ -460,4 +463,81 @@ test("late join receives recent replay and presence reflects connection lifecycl
     socketAlexReplacement.close();
     socketAlex.close();
   });
+});
+
+test("managed realtime gateway fans out live timeline across app instances", async () => {
+  const timelineStore = createInMemoryTimelineStore();
+  const realtimeGateway = createInMemoryRealtimeGateway();
+  const appA = await buildApp({
+    webOrigin: "http://localhost:3000",
+    timelineStore,
+    realtimeGateway
+  });
+  const appB = await buildApp({
+    webOrigin: "http://localhost:3000",
+    timelineStore,
+    realtimeGateway
+  });
+
+  await Promise.all([
+    appA.listen({ port: 0, host: "127.0.0.1" }),
+    appB.listen({ port: 0, host: "127.0.0.1" })
+  ]);
+
+  const addressA = appA.server.address();
+  const addressB = appB.server.address();
+  if (!addressA || typeof addressA === "string" || !addressB || typeof addressB === "string") {
+    throw new Error("Unable to determine server addresses");
+  }
+
+  const baseUrlA = `http://127.0.0.1:${addressA.port}`;
+  const baseUrlB = `http://127.0.0.1:${addressB.port}`;
+
+  try {
+    const joinA = await fetch(`${baseUrlA}/api/join`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ displayName: "Alex" })
+    });
+    const joinB = await fetch(`${baseUrlB}/api/join`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ displayName: "Blair" })
+    });
+    const cookieA = joinA.headers.get("set-cookie");
+    const cookieB = joinB.headers.get("set-cookie");
+    assert.ok(cookieA);
+    assert.ok(cookieB);
+
+    const wsModule = await import("ws");
+    const socketA = new wsModule.WebSocket(toWsUrl(baseUrlA), {
+      headers: { cookie: cookieA }
+    });
+    const socketB = new wsModule.WebSocket(toWsUrl(baseUrlB), {
+      headers: { cookie: cookieB }
+    });
+
+    const seenByB: Array<{ content: string }> = [];
+    socketB.on("message", (raw: RawData) => {
+      const parsed = parseSocketEvent(raw) as {
+        type: string;
+        payload?: { content?: string };
+      };
+      if (parsed.type === "chat/message" && parsed.payload?.content) {
+        seenByB.push({ content: parsed.payload.content });
+      }
+    });
+
+    await Promise.all([waitForOpen(socketA), waitForOpen(socketB)]);
+
+    socketA.send(JSON.stringify({ type: "chat/send", content: "cross-instance" }));
+    await sleep(200);
+
+    assert.equal(seenByB.at(-1)?.content, "cross-instance");
+
+    socketA.close();
+    socketB.close();
+  } finally {
+    await Promise.all([appA.close(), appB.close()]);
+  }
 });

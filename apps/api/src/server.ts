@@ -15,7 +15,12 @@ import { MESSAGE_MAX_LENGTH, RECENT_MESSAGES_LIMIT } from "@chat-app/contracts";
 import Fastify, { type FastifyInstance } from "fastify";
 import { randomUUID } from "node:crypto";
 import { type RawData, WebSocket } from "ws";
-import { createManagedTimelineStoreFromEnv, type ManagedTimelineStore } from "./managed-backend";
+import {
+  createManagedRealtimeGatewayFromEnv,
+  createManagedTimelineStoreFromEnv,
+  type ManagedRealtimeGateway,
+  type ManagedTimelineStore
+} from "./managed-backend";
 
 type ActiveConnection = {
   participantId: string;
@@ -25,6 +30,7 @@ type ActiveConnection = {
 type BuildOptions = {
   webOrigin: string;
   timelineStore?: ManagedTimelineStore;
+  realtimeGateway?: ManagedRealtimeGateway;
 };
 
 const COOKIE_NAME = "chat_session";
@@ -52,9 +58,14 @@ function sendSocketEvent(socket: WebSocket, event: ServerEvent): void {
 export async function buildApp(options: BuildOptions): Promise<FastifyInstance> {
   const app = Fastify({ logger: true });
   const managedStoreFromEnv = createManagedTimelineStoreFromEnv();
+  const managedRealtimeFromEnv = createManagedRealtimeGatewayFromEnv();
   const timelineStore = options.timelineStore ?? managedStoreFromEnv.store;
+  const realtimeGateway = options.realtimeGateway ?? managedRealtimeFromEnv.gateway;
   if (!options.timelineStore && "warning" in managedStoreFromEnv) {
     app.log.warn(managedStoreFromEnv.warning);
+  }
+  if (!options.realtimeGateway && "warning" in managedRealtimeFromEnv) {
+    app.log.warn(managedRealtimeFromEnv.warning);
   }
 
   const participants = new Map<string, Participant>();
@@ -62,6 +73,9 @@ export async function buildApp(options: BuildOptions): Promise<FastifyInstance> 
   let messageOrder = 0;
   const latestPersisted = await timelineStore.listRecentMessages(1);
   messageOrder = latestPersisted.at(0)?.order ?? 0;
+  const unsubscribeRealtime = realtimeGateway.subscribeToMessages((message) => {
+    broadcast({ type: "chat/message", payload: message });
+  });
 
   const broadcast = (event: ServerEvent): void => {
     const serializedEvent = JSON.stringify(event);
@@ -227,10 +241,10 @@ export async function buildApp(options: BuildOptions): Promise<FastifyInstance> 
         void timelineStore
           .appendMessage(chatMessage)
           .then(() => {
-            broadcast({ type: "chat/message", payload: chatMessage });
+            return realtimeGateway.publishMessage(chatMessage);
           })
           .catch((error) => {
-            request.log.error(error, "Failed to persist message in managed timeline store.");
+            request.log.error(error, "Failed to persist/publish message via managed backend.");
             sendSocketEvent(socket, { type: "chat/error", reason: "invalid_payload" });
           });
       });
@@ -243,6 +257,10 @@ export async function buildApp(options: BuildOptions): Promise<FastifyInstance> 
         }
       });
     }
+  });
+
+  app.addHook("onClose", async () => {
+    unsubscribeRealtime();
   });
 
   return app;

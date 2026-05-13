@@ -6,6 +6,11 @@ export interface ManagedTimelineStore {
   listRecentMessages(limit: number): Promise<ChatMessage[]>;
 }
 
+export interface ManagedRealtimeGateway {
+  publishMessage(message: ChatMessage): Promise<void>;
+  subscribeToMessages(handler: (message: ChatMessage) => void): () => void;
+}
+
 type InMemoryTimelineStore = ManagedTimelineStore & {
   listAllMessagesForDebug(): ChatMessage[];
 };
@@ -31,6 +36,25 @@ export function createInMemoryTimelineStore(): InMemoryTimelineStore {
     },
     listAllMessagesForDebug(): ChatMessage[] {
       return sortByOrderAscending(fullTimeline);
+    }
+  };
+}
+
+type InMemoryRealtimeGateway = ManagedRealtimeGateway;
+const inMemoryRealtimeSubscribers = new Set<(message: ChatMessage) => void>();
+
+export function createInMemoryRealtimeGateway(): InMemoryRealtimeGateway {
+  return {
+    async publishMessage(message: ChatMessage): Promise<void> {
+      for (const subscriber of inMemoryRealtimeSubscribers) {
+        subscriber(message);
+      }
+    },
+    subscribeToMessages(handler: (message: ChatMessage) => void): () => void {
+      inMemoryRealtimeSubscribers.add(handler);
+      return () => {
+        inMemoryRealtimeSubscribers.delete(handler);
+      };
     }
   };
 }
@@ -80,6 +104,38 @@ function createSupabaseTimelineStore(client: SupabaseClient): ManagedTimelineSto
   };
 }
 
+function createSupabaseRealtimeGateway(client: SupabaseClient): ManagedRealtimeGateway {
+  const channelName = "chat-room";
+  const eventName = "chat_message";
+
+  return {
+    async publishMessage(message: ChatMessage): Promise<void> {
+      const status = await client.channel(channelName).send({
+        type: "broadcast",
+        event: eventName,
+        payload: message
+      });
+
+      if (status !== "ok") {
+        throw new Error(`supabase_realtime_publish_failed:${status}`);
+      }
+    },
+    subscribeToMessages(handler: (message: ChatMessage) => void): () => void {
+      const channel = client.channel(channelName);
+      channel.on("broadcast", { event: eventName }, ({ payload }) => {
+        if (payload && typeof payload === "object") {
+          handler(payload as ChatMessage);
+        }
+      });
+      void channel.subscribe();
+
+      return () => {
+        void client.removeChannel(channel);
+      };
+    }
+  };
+}
+
 export function createManagedTimelineStoreFromEnv():
   | { store: ManagedTimelineStore; provider: "memory" | "supabase" }
   | { store: ManagedTimelineStore; provider: "memory"; warning: string } {
@@ -98,6 +154,28 @@ export function createManagedTimelineStoreFromEnv():
   const client = createClient(supabaseUrl, supabaseAnonKey);
   return {
     store: createSupabaseTimelineStore(client),
+    provider: "supabase"
+  };
+}
+
+export function createManagedRealtimeGatewayFromEnv():
+  | { gateway: ManagedRealtimeGateway; provider: "memory" | "supabase" }
+  | { gateway: ManagedRealtimeGateway; provider: "memory"; warning: string } {
+  const supabaseUrl = process.env.SUPABASE_URL;
+  const supabaseAnonKey = process.env.SUPABASE_ANON_KEY;
+
+  if (!supabaseUrl || !supabaseAnonKey) {
+    return {
+      gateway: createInMemoryRealtimeGateway(),
+      provider: "memory",
+      warning:
+        "SUPABASE_URL or SUPABASE_ANON_KEY missing; using in-memory realtime gateway fallback."
+    };
+  }
+
+  const client = createClient(supabaseUrl, supabaseAnonKey);
+  return {
+    gateway: createSupabaseRealtimeGateway(client),
     provider: "supabase"
   };
 }
