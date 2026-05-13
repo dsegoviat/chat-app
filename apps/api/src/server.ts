@@ -95,12 +95,10 @@ export async function buildApp(options: BuildOptions): Promise<FastifyInstance> 
 
   app.post<{ Body: JoinRequest }>("/api/join", async (request, reply) => {
     const displayName = String(request.body?.displayName ?? "").trim();
-
-    if (!displayName) {
+    const previousParticipant = resolveParticipantFromCookie(request.cookies[COOKIE_NAME]);
+    if (!previousParticipant && !displayName) {
       return reply.status(400).send({ error: "display_name_required" });
     }
-
-    const previousParticipant = resolveParticipantFromCookie(request.cookies[COOKIE_NAME]);
 
     const participant: Participant = previousParticipant ?? {
       id: randomUUID(),

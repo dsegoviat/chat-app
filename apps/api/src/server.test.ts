@@ -118,6 +118,37 @@ test("join preserves session identity handle continuity across reconnect join", 
   assert.equal(secondParticipant.displayName, "Alex");
 });
 
+test("join allows blank reconnect payload when session identity already exists", async () => {
+  const app = await buildApp({ webOrigin: "http://localhost:3000" });
+
+  const firstJoin = await app.inject({
+    method: "POST",
+    url: "/api/join",
+    payload: { displayName: "Alex" }
+  });
+
+  assert.equal(firstJoin.statusCode, 200);
+  const sessionCookie = firstJoin.cookies.find((cookie) => cookie.name === "chat_session");
+  assert.ok(sessionCookie);
+
+  const reconnectJoin = await app.inject({
+    method: "POST",
+    url: "/api/join",
+    payload: { displayName: "   " },
+    cookies: { chat_session: sessionCookie.value }
+  });
+
+  assert.equal(reconnectJoin.statusCode, 200);
+  const firstParticipant = firstJoin.json().participant as { id: string; displayName: string };
+  const reconnectParticipant = reconnectJoin.json().participant as {
+    id: string;
+    displayName: string;
+  };
+
+  assert.equal(reconnectParticipant.id, firstParticipant.id);
+  assert.equal(reconnectParticipant.displayName, "Alex");
+});
+
 test("message pipeline enforces validation, order, and recent replay cap", async () => {
   await withServer(async (baseUrl) => {
     const join = await fetch(`${baseUrl}/api/join`, {
